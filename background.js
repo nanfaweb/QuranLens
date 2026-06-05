@@ -281,16 +281,42 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, videoDetails) {
 // ─── Match Captions Against Corpus ──────────────────────────────────────────
 
 async function matchCaptions(text, videoDetails) {
-  if (!text || text.length < 10) {
+  let joinedText = '';
+  if (Array.isArray(text)) {
+    joinedText = text.filter(e => e && typeof e === 'string').join(' ').replace(/\s+/g, ' ').trim();
+  } else if (typeof text === 'string') {
+    if (text.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(text);
+        if (Array.isArray(parsed)) {
+          joinedText = parsed.filter(e => e && typeof e === 'string').join(' ').replace(/\s+/g, ' ').trim();
+        } else {
+          joinedText = text.trim();
+        }
+      } catch (_) {
+        joinedText = text.trim();
+      }
+    } else {
+      joinedText = text.trim();
+    }
+  }
+
+  if (!joinedText || joinedText.length < 10) {
     return { type: 'NO_MATCH', message: 'Caption text too short for analysis.' };
   }
 
   try {
     const storageData = await chrome.storage.session.get('lastMatch');
     const lastMatch = storageData?.lastMatch || null;
-    const surahHint = detectSurahHint(videoDetails);
 
-    const result = await findVerse(text, lastMatch, surahHint);
+    // ── FIX 1: surah hint disabled ──────────────────────────────────
+    // Commenting out surah hint extraction to fall back to full corpus
+    // search on every call until the hint logic is re-validated.
+    // const surahHint = detectSurahHint(videoDetails);
+    const surahHint = undefined;
+    // ────────────────────────────────────────────────────────────────
+
+    const result = await findVerse(joinedText, lastMatch, surahHint);
 
     if (result) {
       await chrome.storage.session.set({ lastMatch: { surah: result.surah, ayah: result.ayah } });

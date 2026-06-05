@@ -37,10 +37,13 @@
     const eventTexts = [];
     const currentBufferStartTimes = [];
 
+    console.log(LOG, 'parseJson3ToTranscript: currentTimeMs =', currentTimeMs, 'total events =', events.length);
+
     for (const event of events) {
       if (currentTimeMs !== undefined) {
         const start = event.tStartMs || 0;
-        const inWindow = (start >= currentTimeMs - 10000 && start <= currentTimeMs);
+        // FIX 3: reduced rolling buffer window from 10s to 6s
+        const inWindow = (start >= currentTimeMs - 6000 && start <= currentTimeMs);
         if (!inWindow || consumedStartTimes.has(start)) {
           continue;
         }
@@ -63,9 +66,12 @@
 
     if (currentTimeMs !== undefined) {
       lastBufferStartTimes = currentBufferStartTimes;
+      console.log(LOG, 'Matched events in window count:', currentBufferStartTimes.length, 'startTimes:', currentBufferStartTimes);
     }
 
+    // Return all matched caption entries joined into a single string.
     const transcript = eventTexts.join(' ').replace(/\s+/g, ' ').trim();
+    console.log(LOG, 'Final joined transcript:', transcript);
     if (!transcript) return { error: 'no text in JSON3 events' };
     return { transcript };
   }

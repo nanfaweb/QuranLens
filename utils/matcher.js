@@ -9,6 +9,11 @@
  * All 114 Surah names are hardcoded — no runtime API calls needed.
  */
 
+// Import/require normalizeArabic if in Node environment and not already defined globally
+if (typeof normalizeArabic === 'undefined' && typeof require !== 'undefined') {
+  globalThis.normalizeArabic = require('./arabic.js');
+}
+
 // ─── Surah Information (1–114) ──────────────────────────────────────────────
 
 const SURAH_INFO = {
@@ -147,19 +152,19 @@ function prefixLevenshtein(windowText, ayahText, maxDist) {
   if (n === 0) return 0;
   if (m === 0) return n;
 
-  // prev[j] is distance between empty window prefix and ayahText.substring(0, j)
   let prev = new Array(n + 1);
+  const isWindowShorter = m < n;
   for (let j = 0; j <= n; j++) {
-    prev[j] = j;
+    prev[j] = isWindowShorter ? 0 : j;
   }
 
-  let minDistance = n; // Best distance found so far (matching entire ayah against a prefix of window)
+  let minDistance = Math.max(m, n);
 
   for (let i = 1; i <= m; i++) {
     const curr = new Array(n + 1);
-    curr[0] = i; // distance to empty ayahText
+    curr[0] = isWindowShorter ? i : 0;
 
-    let rowMin = i;
+    let rowMin = curr[0];
 
     for (let j = 1; j <= n; j++) {
       const cost = windowText[i - 1] === ayahText[j - 1] ? 0 : 1;
@@ -171,9 +176,24 @@ function prefixLevenshtein(windowText, ayahText, maxDist) {
       if (curr[j] < rowMin) rowMin = curr[j];
     }
 
-    // Track the edit distance to match the full ayahText (column n)
-    if (curr[n] < minDistance) {
-      minDistance = curr[n];
+    if (!isWindowShorter) {
+      if (curr[n] < minDistance) {
+        minDistance = curr[n];
+      }
+    }
+
+    if (i === m) {
+      if (isWindowShorter) {
+        for (let j = 0; j <= n; j++) {
+          if (curr[j] < minDistance) {
+            minDistance = curr[j];
+          }
+        }
+      } else {
+        if (curr[n] < minDistance) {
+          minDistance = curr[n];
+        }
+      }
     }
 
     // Early termination: if the best possible score in this row (rowMin)
@@ -272,10 +292,13 @@ async function loadCorpus() {
 // ─── Candidate Selection ────────────────────────────────────────────────────
 
 const MAX_CANDIDATES = 100;
+const MIN_CANDIDATES = 200; // FIX 3: minimum candidate pool size
 
 /**
  * Use the n-gram index to find the top candidate verses for a text window.
  * Returns verse indices sorted by TF-IDF cosine similarity (descending).
+ * Enforces a minimum pool of MIN_CANDIDATES by padding with highest IDF-weighted
+ * verses from the full corpus.
  * 
  * @param {string} windowText — normalized text window
  * @param {number|null} [surahHint] — optional surah number to restrict candidates
@@ -318,7 +341,31 @@ function selectCandidates(windowText, surahHint) {
 
   // Sort by score descending, take top candidates
   scored.sort((a, b) => b.score - a.score);
-  return scored.slice(0, MAX_CANDIDATES).map(s => s.idx);
+  let selected = scored.slice(0, MAX_CANDIDATES).map(s => s.idx);
+
+  // FIX 3: Enforce minimum candidate pool of 200
+  // If fewer than MIN_CANDIDATES were selected, pad with the highest
+  // IDF-weighted verses from the full corpus not already in the list.
+  if (selected.length < MIN_CANDIDATES && _corpus) {
+    const selectedSet = new Set(selected);
+
+    // Build IDF score for ALL verses that had any trigram hit (incl. those
+    // below the 0.05 threshold) but are not already selected
+    const padding = [];
+    for (const [idx, sumOfIdf] of weightedHits) {
+      if (!selectedSet.has(idx)) {
+        padding.push({ idx, score: sumOfIdf });
+      }
+    }
+    padding.sort((a, b) => b.score - a.score);
+
+    for (const p of padding) {
+      if (selected.length >= MIN_CANDIDATES) break;
+      selected.push(p.idx);
+    }
+  }
+
+  return selected;
 }
 
 /**
@@ -337,12 +384,22 @@ function selectCandidates(windowText, surahHint) {
  * @returns {Promise<Object|null>} — { surah, ayah, confidence, surahName, text } or null
  */
 async function findVerse(transcriptText, lastMatch, surahHint) {
-  if (!transcriptText || typeof transcriptText !== 'string') return null;
+  console.log('[QuranLens Matcher] findVerse called with transcript length:', transcriptText?.length, 'text:', transcriptText);
+  if (!transcriptText || typeof transcriptText !== 'string') {
+    console.log('[QuranLens Matcher] findVerse: Empty or invalid transcript.');
+    return null;
+  }
 
   const corpus = await loadCorpus();
   const normalizedTranscript = normalizeArabic(transcriptText);
+  console.log('[QuranLens Matcher] findVerse: Normalized transcript:', normalizedTranscript);
 
-  if (normalizedTranscript.length < 5) return null;
+  if (normalizedTranscript.length < 5) {
+    console.log('[QuranLens Matcher] findVerse: Normalized transcript too short (<5 chars).');
+    return null;
+  }
+
+  console.log('[QuranLens Matcher] findVerse: surahHint =', surahHint, 'lastMatch =', lastMatch);
 
   // Helper to run matching for a specific hint (or null for full search)
   function runMatching(hint) {
@@ -368,6 +425,46 @@ async function findVerse(transcriptText, lastMatch, surahHint) {
 
     let totalEvaluated = 0;
 
+    // FIX 2: Detect stale lastMatch before the main scoring loop.
+    // Do a quick first pass over candidates to find the top raw candidate
+    // (ignoring continuity). If it's in a different surah from lastMatch
+    // and its raw score is > 0.70, treat lastMatch as stale.
+    let lastMatchIsStale = false;
+    if (lastMatch) {
+      let topRawScore = 0;
+      let topRawSurah = null;
+
+      for (const window of windows) {
+        const candidates = selectCandidates(window, hint);
+        for (const idx of candidates) {
+          const verse = corpus[idx];
+          const ayahText = verse.normalized;
+          const ayahLen = ayahText.length;
+          if (ayahLen < 3) continue;
+
+          const padding = Math.max(5, Math.floor(ayahLen * 0.15));
+          const compareLen = Math.min(window.length, ayahLen + padding);
+          const compareText = window.substring(0, compareLen);
+          const shorterLen = Math.min(compareText.length, ayahLen);
+          const maxDist = Math.floor(shorterLen * 0.40);
+
+          const dist = prefixLevenshtein(compareText, ayahText, maxDist);
+          if (dist > maxDist) continue;
+
+          const rawConf = 1 - (dist / shorterLen);
+          if (rawConf > topRawScore) {
+            topRawScore = rawConf;
+            topRawSurah = verse.surah;
+          }
+        }
+      }
+
+      if (topRawSurah !== null && topRawSurah !== lastMatch.surah && topRawScore > 0.70) {
+        lastMatchIsStale = true;
+        console.log('[QuranLens Matcher] lastMatch is stale — top raw candidate surah:', topRawSurah, 'score:', topRawScore, 'vs lastMatch surah:', lastMatch.surah);
+      }
+    }
+
     for (const window of windows) {
       // Stage 1: Fast candidate selection via n-gram index (restricted by surah hint if provided)
       const candidates = selectCandidates(window, hint);
@@ -386,13 +483,14 @@ async function findVerse(transcriptText, lastMatch, surahHint) {
         const compareLen = Math.min(window.length, ayahLen + padding);
         const compareText = window.substring(0, compareLen);
 
-        // Compute max acceptable distance for early termination
-        const maxDist = Math.floor(ayahLen * 0.40); // reject if >40% edits
+        // Compute max acceptable distance based on the shorter length
+        const shorterLen = Math.min(compareText.length, ayahLen);
+        const maxDist = Math.floor(shorterLen * 0.40);
 
         const dist = prefixLevenshtein(compareText, ayahText, maxDist);
         if (dist > maxDist) continue;
 
-        let confidence = 1 - (dist / ayahLen);
+        let confidence = 1 - (dist / shorterLen);
 
         // Require higher confidence for short verses to prevent false prefix alignments
         let minConfidence = 0.60;
@@ -403,7 +501,8 @@ async function findVerse(transcriptText, lastMatch, surahHint) {
         }
 
         // Apply temporal continuity scoring multiplier
-        if (lastMatch) {
+        // FIX 2: detect stale lastMatch before applying continuity
+        if (lastMatch && !lastMatchIsStale) {
           if (verse.surah === lastMatch.surah) {
             if (verse.ayah === lastMatch.ayah + 1) {
               confidence *= 1.25;
@@ -411,9 +510,12 @@ async function findVerse(transcriptText, lastMatch, surahHint) {
               confidence *= 1.10;
             }
           } else {
-            confidence *= 0.80;
+            confidence *= 0.90; // FIX 2: softened from 0.80 to 0.90
           }
         }
+
+        // [FIX 2] Temporary debug log — remove once confirmed working
+        console.log("[QuranLens] top candidate:", verse.surah, verse.ayah, "score:", confidence, "threshold:", minConfidence);
 
         if (confidence > bestConfidence && confidence > minConfidence) {
           bestConfidence = confidence;
@@ -425,6 +527,7 @@ async function findVerse(transcriptText, lastMatch, surahHint) {
             surahName: surahInfo,
             text: verse.text || ''
           };
+          console.log('[QuranLens Matcher] New best candidate match:', bestMatch.surah, ':', bestMatch.ayah, 'confidence =', bestMatch.confidence);
         }
       }
     }
@@ -439,7 +542,7 @@ async function findVerse(transcriptText, lastMatch, surahHint) {
     console.log(`[QuranLens] Restricting corpus search to surahHint: ${surahHint}`);
     const res = runMatching(surahHint);
     matchResult = res.bestMatch;
-    console.log(`[QuranLens] Hint run evaluated ${res.totalEvaluated} candidates`);
+    console.log(`[QuranLens] Hint run evaluated ${res.totalEvaluated} candidates. Best match:`, matchResult);
   }
 
   if (!matchResult) {
@@ -448,7 +551,7 @@ async function findVerse(transcriptText, lastMatch, surahHint) {
     }
     const res = runMatching(null);
     matchResult = res.bestMatch;
-    console.log(`[QuranLens] Full run evaluated ${res.totalEvaluated} candidates`);
+    console.log(`[QuranLens] Full run evaluated ${res.totalEvaluated} candidates. Best match:`, matchResult);
   }
 
   console.timeEnd('[QuranLens] Verse matching');

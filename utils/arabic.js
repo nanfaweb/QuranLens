@@ -1,65 +1,60 @@
 /**
  * QuranLens — Arabic Text Normalization
- * 
- * Shared normalization function used by both the corpus builder (Node.js)
+ *
+ * Pure normalization function shared by the corpus builder (Node.js)
  * and the runtime matcher (browser extension context).
- * 
- * Normalization rules:
- *  1. Strip Tashkeel diacritics (U+0610–U+061A, U+064B–U+065F)
- *  2. Remove Tatweel / Kashida (U+0640)
- *  3. Normalize Alef variants (U+0622, U+0623, U+0625) → plain Alef (U+0627)
- *  4. Normalize Teh Marbuta (U+0629) → Heh (U+0647)
- *  5. Collapse multiple whitespace into single space and trim
+ *
+ * All rules are applied in a fixed order so that both Uthmani corpus
+ * text and YouTube ASR transcript input produce identical output.
  */
 
-// Regex: all Arabic tashkeel / diacritical marks
-const TASHKEEL_RE = /[\u0610-\u061A\u064B-\u065F\u0670]/g;
-
-// Regex: Tatweel (elongation character)
-const TATWEEL_RE = /\u0640/g;
-
-// Regex: Alef variants — Alef Madda, Alef Hamza Above, Alef Hamza Below, Alef Wasla
-const ALEF_VARIANTS_RE = /[\u0622\u0623\u0625\u0671]/g;
-
-// Plain Alef
-const ALEF = '\u0627';
-
-// Teh Marbuta
-const TEH_MARBUTA_RE = /\u0629/g;
-
-// Heh
-const HEH = '\u0647';
-
-// Alef Maksura
-const ALEF_MAKSURA_RE = /\u0649/g;
-
-// Yeh
-const YEH = '\u064a';
-
-// Multiple whitespace
-const MULTI_SPACE_RE = /\s+/g;
-
+/**
+ * Normalize Arabic text so that Uthmani corpus and ASR transcript
+ * forms produce identical output.
+ *
+ * Pure function — same input always produces same output, no side effects.
+ *
+ * @param {string} text — raw Arabic text
+ * @returns {string} — normalized text
+ */
 function normalizeArabic(text) {
   if (!text || typeof text !== 'string') return '';
 
   return text
-    .replace(/\u0671/g, '\u0627')
-    .replace(/[\u0622\u0623\u0625]/g, '\u0627')
-    .replace(/\u0624/g, '\u0648')
-    .replace(/\u0626/g, '\u064a')
-    .replace(/\u0621/g, '')
-    .replace(/\u0649/g, '\u064a')
-    .replace(/[،؟؛.]/g, '')
-    .replace(TASHKEEL_RE, '')
-    .replace(TATWEEL_RE, '')
-    .replace(ALEF_VARIANTS_RE, ALEF)
-    .replace(TEH_MARBUTA_RE, HEH)
-    .replace(ALEF_MAKSURA_RE, YEH)
-    .replace(MULTI_SPACE_RE, ' ')
+    // STEP 1 — Remove all diacritics and Quranic annotation marks
+    .replace(/[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06DC\u06DF-\u06E8\u06EA-\u06EF\u0640]/g, '')
+
+    // STEP 2 — Normalize Alef variants → bare Alef \u0627
+    .replace(/[\u0622\u0623\u0625\u0671]/g, '\u0627')
+
+    // STEP 3 — Normalize Hamza-bearing letters
+    .replace(/\u0624/g, '\u0648') // ؤ → و
+    .replace(/\u0626/g, '\u064A') // ئ → ي
+
+    // STEP 4 — Remove standalone Hamza
+    .replace(/\u0621/g, '') // ء → empty
+
+    // STEP 5 — Normalize Ya Maqsura → Ya
+    .replace(/\u0649/g, '\u064A') // ى → ي
+
+    // STEP 6 — Normalize Teh Marbuta → Ha
+    .replace(/\u0629/g, '\u0647') // ة → ه
+
+    // STEP 7 — Remove Arabic punctuation and Quranic marks
+    .replace(/[\u060C\u061B\u061F\u06DD\u06DE\.,;:?!"'\(\)\[\]\-]/g, '')
+
+    // STEP 8 — Post-normalization sequence cleanup
+    .replace(/\u0627\u0627+/g, '\u0627') // اا → ا
+    .replace(/\u0648\u0648+/g, '\u0648') // وو → و
+    .replace(/\u064A\u064A+/g, '\u064A') // يي → ي
+
+    // STEP 9 — Normalize whitespace
+    .replace(/[\t\u00A0\u200B\u200C\u200D]/g, ' ')
+    .replace(/\s+/g, ' ')
     .trim();
 }
 
-// Support both Node.js (CommonJS) and browser (ES module-like) environments
+// Export normalizeArabic as the sole export of arabic.js
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { normalizeArabic };
+  module.exports = normalizeArabic;
 }

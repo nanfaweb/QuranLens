@@ -11,7 +11,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { normalizeArabic } = require('../utils/arabic.js');
+const normalizeArabic = require('../utils/arabic.js');
 
 const API_BASE = 'https://api.quran.com/api/v4';
 const TOTAL_CHAPTERS = 114;
