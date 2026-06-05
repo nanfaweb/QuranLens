@@ -212,6 +212,7 @@ function extractNgrams(text) {
 let _corpus = null;
 let _ngramIndex = null;   // Map<trigram, number[]> — verse indices
 let _verseNgramCounts = null; // number[] — n-gram count per verse
+let _trigramIdf = null; // Map<trigram, number> — IDF weight per trigram
 
 /**
  * Load the pre-built Quran corpus and build the n-gram inverted index.
@@ -248,6 +249,16 @@ async function loadCorpus() {
         list.push(idx);
       }
     }
+
+    // Compute IDF weight for each trigram
+    const totalVerses = _corpus.length;
+    _trigramIdf = new Map();
+    for (const [ng, list] of _ngramIndex.entries()) {
+      const versesContainingTrigram = list.length;
+      const idf = Math.log(1 + totalVerses / versesContainingTrigram);
+      _trigramIdf.set(ng, idf);
+    }
+
     console.timeEnd('[QuranLens] Building n-gram index');
     console.log(`[QuranLens] Index: ${_ngramIndex.size} unique trigrams for ${_corpus.length} verses`);
 
@@ -264,36 +275,41 @@ const MAX_CANDIDATES = 100;
 
 /**
  * Use the n-gram index to find the top candidate verses for a text window.
- * Returns verse indices sorted by n-gram overlap (descending).
+ * Returns verse indices sorted by TF-IDF cosine similarity (descending).
  * 
  * @param {string} windowText — normalized text window
+ * @param {number|null} [surahHint] — optional surah number to restrict candidates
  * @returns {number[]} — array of corpus indices
  */
-function selectCandidates(windowText) {
+function selectCandidates(windowText, surahHint) {
   const queryNgrams = extractNgrams(windowText);
   if (queryNgrams.size === 0) return [];
 
-  // Count how many query n-grams each verse shares
-  const hitCounts = new Map(); // verseIdx -> count
+  // Count TF-IDF score for each verse
+  const weightedHits = new Map(); // verseIdx -> sum of IDF weights
 
   for (const ng of queryNgrams) {
     const postings = _ngramIndex.get(ng);
     if (!postings) continue;
+    const idf = _trigramIdf.get(ng) || 0;
 
     for (const idx of postings) {
-      hitCounts.set(idx, (hitCounts.get(idx) || 0) + 1);
+      if (surahHint !== undefined && surahHint !== null) {
+        if (_corpus[idx].surah !== surahHint) continue;
+      }
+      weightedHits.set(idx, (weightedHits.get(idx) || 0) + idf);
     }
   }
 
-  if (hitCounts.size === 0) return [];
+  if (weightedHits.size === 0) return [];
 
-  // Score by Cosine Similarity: hits / sqrt(queryNgramCount * verseNgramCount)
+  // Score by Cosine Similarity using sum of IDF weights
   const scored = [];
   const queryCount = queryNgrams.size;
 
-  for (const [idx, hits] of hitCounts) {
+  for (const [idx, sumOfIdf] of weightedHits) {
     const verseCount = _verseNgramCounts[idx];
-    const score = hits / Math.sqrt(queryCount * (verseCount || 1));
+    const score = sumOfIdf / Math.sqrt(queryCount * (verseCount || 1));
     // Quick filter: require at least some overlap
     if (score > 0.05) {
       scored.push({ idx, score });
@@ -304,8 +320,6 @@ function selectCandidates(windowText) {
   scored.sort((a, b) => b.score - a.score);
   return scored.slice(0, MAX_CANDIDATES).map(s => s.idx);
 }
-
-// ─── Verse Matching ─────────────────────────────────────────────────────────
 
 /**
  * Find the best matching Quran verse for a given transcript text.
@@ -318,9 +332,11 @@ function selectCandidates(windowText) {
  *  5. Return top match if confidence > 0.60
  * 
  * @param {string} transcriptText — raw Arabic transcript
+ * @param {Object|null} [lastMatch] — optional { surah, ayah } of previous match
+ * @param {number|null} [surahHint] — optional surah number to restrict candidate selection
  * @returns {Promise<Object|null>} — { surah, ayah, confidence, surahName, text } or null
  */
-async function findVerse(transcriptText) {
+async function findVerse(transcriptText, lastMatch, surahHint) {
   if (!transcriptText || typeof transcriptText !== 'string') return null;
 
   const corpus = await loadCorpus();
@@ -328,74 +344,115 @@ async function findVerse(transcriptText) {
 
   if (normalizedTranscript.length < 5) return null;
 
-  console.time('[QuranLens] Verse matching');
+  // Helper to run matching for a specific hint (or null for full search)
+  function runMatching(hint) {
+    let bestMatch = null;
+    let bestConfidence = 0;
 
-  let bestMatch = null;
-  let bestConfidence = 0;
+    // Create sliding windows over the transcript
+    const windowSize = 40;
+    const stepSize = 10;
+    const windows = [];
 
-  // Create sliding windows over the transcript
-  const windowSize = 40;
-  const stepSize = 10;
-  const windows = [];
-
-  for (let i = 0; i < normalizedTranscript.length; i += stepSize) {
-    const end = Math.min(i + windowSize * 3, normalizedTranscript.length);
-    const window = normalizedTranscript.substring(i, end);
-    if (window.length >= 10) {
-      windows.push(window);
-    }
-  }
-
-  if (windows.length === 0) {
-    windows.push(normalizedTranscript);
-  }
-
-  let totalEvaluated = 0;
-
-  for (const window of windows) {
-    // Stage 1: Fast candidate selection via n-gram index
-    const candidates = selectCandidates(window);
-
-    // Stage 2: Levenshtein against candidates only
-    for (const idx of candidates) {
-      totalEvaluated++;
-      const verse = corpus[idx];
-      const ayahText = verse.normalized;
-      const ayahLen = ayahText.length;
-
-      if (ayahLen < 3) continue;
-
-      // Pad comparison window text slightly based on ayah length (approx 15% padding)
-      const padding = Math.max(5, Math.floor(ayahLen * 0.15));
-      const compareLen = Math.min(window.length, ayahLen + padding);
-      const compareText = window.substring(0, compareLen);
-
-      // Compute max acceptable distance for early termination
-      const maxDist = Math.floor(ayahLen * 0.40); // reject if >40% edits
-
-      const dist = prefixLevenshtein(compareText, ayahText, maxDist);
-      if (dist > maxDist) continue;
-
-      const confidence = 1 - (dist / ayahLen);
-
-      if (confidence > bestConfidence && confidence > 0.60) {
-        bestConfidence = confidence;
-        const surahInfo = SURAH_INFO[verse.surah] || { arabic: '', english: '', ayahCount: 0 };
-        bestMatch = {
-          surah: verse.surah,
-          ayah: verse.ayah,
-          confidence: Math.round(confidence * 100) / 100,
-          surahName: surahInfo,
-          text: verse.text || ''
-        };
+    for (let i = 0; i < normalizedTranscript.length; i += stepSize) {
+      const end = Math.min(i + windowSize * 3, normalizedTranscript.length);
+      const window = normalizedTranscript.substring(i, end);
+      if (window.length >= 10) {
+        windows.push(window);
       }
     }
+
+    if (windows.length === 0) {
+      windows.push(normalizedTranscript);
+    }
+
+    let totalEvaluated = 0;
+
+    for (const window of windows) {
+      // Stage 1: Fast candidate selection via n-gram index (restricted by surah hint if provided)
+      const candidates = selectCandidates(window, hint);
+
+      // Stage 2: Levenshtein against candidates only
+      for (const idx of candidates) {
+        totalEvaluated++;
+        const verse = corpus[idx];
+        const ayahText = verse.normalized;
+        const ayahLen = ayahText.length;
+
+        if (ayahLen < 3) continue;
+
+        // Pad comparison window text slightly based on ayah length (approx 15% padding)
+        const padding = Math.max(5, Math.floor(ayahLen * 0.15));
+        const compareLen = Math.min(window.length, ayahLen + padding);
+        const compareText = window.substring(0, compareLen);
+
+        // Compute max acceptable distance for early termination
+        const maxDist = Math.floor(ayahLen * 0.40); // reject if >40% edits
+
+        const dist = prefixLevenshtein(compareText, ayahText, maxDist);
+        if (dist > maxDist) continue;
+
+        let confidence = 1 - (dist / ayahLen);
+
+        // Require higher confidence for short verses to prevent false prefix alignments
+        let minConfidence = 0.60;
+        if (ayahLen < 6) {
+          minConfidence = 0.85;
+        } else if (ayahLen < 12) {
+          minConfidence = 0.70;
+        }
+
+        // Apply temporal continuity scoring multiplier
+        if (lastMatch) {
+          if (verse.surah === lastMatch.surah) {
+            if (verse.ayah === lastMatch.ayah + 1) {
+              confidence *= 1.25;
+            } else if (Math.abs(verse.ayah - (lastMatch.ayah + 1)) <= 2) {
+              confidence *= 1.10;
+            }
+          } else {
+            confidence *= 0.80;
+          }
+        }
+
+        if (confidence > bestConfidence && confidence > minConfidence) {
+          bestConfidence = confidence;
+          const surahInfo = SURAH_INFO[verse.surah] || { arabic: '', english: '', ayahCount: 0 };
+          bestMatch = {
+            surah: verse.surah,
+            ayah: verse.ayah,
+            confidence: Math.round(confidence * 100) / 100,
+            surahName: surahInfo,
+            text: verse.text || ''
+          };
+        }
+      }
+    }
+
+    return { bestMatch, totalEvaluated };
+  }
+
+  console.time('[QuranLens] Verse matching');
+  let matchResult = null;
+  
+  if (surahHint) {
+    console.log(`[QuranLens] Restricting corpus search to surahHint: ${surahHint}`);
+    const res = runMatching(surahHint);
+    matchResult = res.bestMatch;
+    console.log(`[QuranLens] Hint run evaluated ${res.totalEvaluated} candidates`);
+  }
+
+  if (!matchResult) {
+    if (surahHint) {
+      console.log('[QuranLens] No match found in surahHint, falling back to full corpus search');
+    }
+    const res = runMatching(null);
+    matchResult = res.bestMatch;
+    console.log(`[QuranLens] Full run evaluated ${res.totalEvaluated} candidates`);
   }
 
   console.timeEnd('[QuranLens] Verse matching');
-  console.log(`[QuranLens] Evaluated ${totalEvaluated} candidates across all windows`);
-
-  return bestMatch;
+  return matchResult;
 }
 
 /**
@@ -408,6 +465,115 @@ function getQuranUrl(surah, ayah) {
   return `https://quran.com/${surah}/${ayah}`;
 }
 
+// Build a static map of surah variants
+let _surahVariants = null;
+
+function getSurahVariants() {
+  if (_surahVariants) return _surahVariants;
+
+  _surahVariants = [];
+  
+  // Custom manual overrides / additions for surahs that have alternative names
+  const customVariants = {
+    9: ["tawbah", "tawba", "baraah", "bara'ah", "التوبة", "توبة", "براءة"],
+    17: ["isra", "isra'", "bani israel", "الاسراء", "اسراء", "بني اسرائيل"],
+    32: ["sajdah", "sajda", "tanzil", "السجدة", "سجدة"],
+    40: ["ghafir", "ghafar", "mu'min", "mumin", "غافر", "المؤمن"],
+    41: ["fussilat", "fussilat", "ha mim sajdah", "فصلت", "حم سجده"],
+    76: ["insan", "dahr", "الانسان", "الدهر"],
+    94: ["sharh", "inshirah", "nashrah", "الشرح", "الانشراح"],
+    111: ["masad", "lahab", "tabbat", "المسد", "الطلب", "تبت", "لهب"]
+  };
+
+  for (let surahNum = 1; surahNum <= 114; surahNum++) {
+    const info = SURAH_INFO[surahNum];
+    if (!info) continue;
+    const variants = new Set();
+
+    // 1. Add exact Arabic and English from SURAH_INFO
+    variants.add(info.english.toLowerCase());
+    variants.add(info.arabic);
+
+    // 2. Add normalized Arabic
+    const normArabic = normalizeArabic(info.arabic);
+    if (normArabic) variants.add(normArabic);
+
+    // 3. Add Arabic without "ال" prefix
+    if (info.arabic.startsWith('ال')) {
+      const withoutAl = info.arabic.substring(2);
+      variants.add(withoutAl);
+      const normWithoutAl = normalizeArabic(withoutAl);
+      if (normWithoutAl) variants.add(normWithoutAl);
+    }
+
+    // 4. English variations
+    let engClean = info.english.toLowerCase()
+      .replace(/[\'\-]/g, '') // remove apostrophes and hyphens
+      .replace(/\s+/g, ' '); // collapse spaces
+    variants.add(engClean);
+    variants.add(engClean.replace(/\s/g, '')); // remove spaces entirely
+
+    // Strip common English prefixes
+    const prefixRegex = /^(al|an|at|ash|ar|as|az|ad|adh|el)[\-\s\']/i;
+    let stripped = info.english.replace(prefixRegex, '').toLowerCase();
+    variants.add(stripped);
+    
+    let strippedClean = stripped.replace(/[\'\-\s]/g, '');
+    variants.add(strippedClean);
+
+    // Handle 'ah' vs 'a' endings
+    for (const v of Array.from(variants)) {
+      if (typeof v === 'string') {
+        if (v.endsWith('ah')) {
+          variants.add(v.slice(0, -2) + 'a');
+        } else if (v.endsWith('a')) {
+          variants.add(v + 'h');
+        }
+      }
+    }
+
+    // Add custom/manual variants
+    if (customVariants[surahNum]) {
+      for (const cv of customVariants[surahNum]) {
+        variants.add(cv.toLowerCase());
+      }
+    }
+
+    _surahVariants.push({
+      surah: surahNum,
+      names: Array.from(variants).filter(v => v && v.length >= 2).sort((a, b) => b.length - a.length)
+    });
+  }
+
+  return _surahVariants;
+}
+
+function detectSurahHint(videoDetails) {
+  if (!videoDetails) return null;
+  const title = (videoDetails.title || '').toLowerCase();
+  const desc = (videoDetails.shortDescription || '').toLowerCase();
+  const textToSearch = title + ' ' + desc;
+
+  const list = getSurahVariants();
+
+  for (const item of list) {
+    for (const name of item.names) {
+      // Escape for regex matching
+      const escapedName = name.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+      
+      // Custom word boundary matcher that handles Arabic correctly:
+      const regex = new RegExp(`(?:^|[^a-zA-Z0-9\\u0600-\\u06FF])${escapedName}(?:$|[^a-zA-Z0-9\\u0600-\\u06FF])`, 'i');
+      
+      if (regex.test(textToSearch)) {
+        console.log(`[QuranLens] Detected Surah hint: Surah ${item.surah} (${name})`);
+        return item.surah;
+      }
+    }
+  }
+
+  return null;
+}
+
 // Export for use in extension context (loaded via importScripts or <script>)
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
@@ -416,6 +582,7 @@ if (typeof module !== 'undefined' && module.exports) {
     levenshtein: prefixLevenshtein,
     prefixLevenshtein,
     SURAH_INFO,
-    loadCorpus
+    loadCorpus,
+    detectSurahHint
   };
 }

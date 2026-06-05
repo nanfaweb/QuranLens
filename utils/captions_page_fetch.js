@@ -12,6 +12,17 @@
 
   const LOG = '[QuranLens Page]';
 
+  const consumedStartTimes = new Set();
+  let lastBufferStartTimes = [];
+
+  window.addEventListener('quranlens-reset-buffer', () => {
+    console.log(LOG, 'Resetting caption buffer (marking current buffer events as consumed)', lastBufferStartTimes);
+    for (const t of lastBufferStartTimes) {
+      consumedStartTimes.add(t);
+    }
+    lastBufferStartTimes = [];
+  });
+
   function parseJson3ToTranscript(text, currentTimeMs) {
     let data;
     try {
@@ -24,21 +35,16 @@
       return { error: 'no events in JSON3' };
     }
     const eventTexts = [];
-    const windowRadiusMs = 3 * 1000; // ±2.5 seconds (5s total)
+    const currentBufferStartTimes = [];
 
     for (const event of events) {
       if (currentTimeMs !== undefined) {
         const start = event.tStartMs || 0;
-        const duration = event.dDurationMs || 0;
-        const end = start + duration;
-
-        const windowStart = currentTimeMs - windowRadiusMs;
-        const windowEnd = currentTimeMs + windowRadiusMs;
-
-        const overlaps = (start <= windowEnd && end >= windowStart);
-        if (!overlaps) {
+        const inWindow = (start >= currentTimeMs - 10000 && start <= currentTimeMs);
+        if (!inWindow || consumedStartTimes.has(start)) {
           continue;
         }
+        currentBufferStartTimes.push(start);
       }
 
       const eventSegs = [];
@@ -54,6 +60,11 @@
         eventTexts.push(eventText.replace(/\n/g, ' ').trim());
       }
     }
+
+    if (currentTimeMs !== undefined) {
+      lastBufferStartTimes = currentBufferStartTimes;
+    }
+
     const transcript = eventTexts.join(' ').replace(/\s+/g, ' ').trim();
     if (!transcript) return { error: 'no text in JSON3 events' };
     return { transcript };

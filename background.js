@@ -63,7 +63,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ type: 'ANALYZING' });
 
     // Do the actual work asynchronously and push results to the tab
-    handleAnalyzeVideo(tabId, sender.tab, message.currentTime).catch(err => {
+    handleAnalyzeVideo(tabId, sender.tab, message.currentTime, message.videoDetails).catch(err => {
       console.error('[QuranLens BG] Analyze error:', err);
       chrome.tabs.sendMessage(tabId, {
         type: 'ERROR',
@@ -145,7 +145,7 @@ async function fetchArabicCaptionsViaPlayer(tabId, videoId, currentTime) {
 
 // ─── Handler: Analyze Video ─────────────────────────────────────────────────
 
-async function handleAnalyzeVideo(tabId, tab, currentTime) {
+async function handleAnalyzeVideo(tabId, tab, currentTime, videoDetails) {
   try {
     if (!tab || !tab.url || !tab.url.includes('youtube.com/watch')) {
       await pushResult(tabId, { type: 'ERROR', message: 'Please open a YouTube video first.' });
@@ -155,11 +155,13 @@ async function handleAnalyzeVideo(tabId, tab, currentTime) {
     const urlObj = new URL(tab.url);
     const videoId = urlObj.searchParams.get('v');
 
+    let activeVideoDetails = videoDetails || null;
+
     // Primary path: player-generated timedtext URL with pot= (fixes empty JSON body)
     if (videoId) {
       const playerCaptions = await fetchArabicCaptionsViaPlayer(tabId, videoId, currentTime);
       if (playerCaptions && playerCaptions.length > 10) {
-        const result = await matchCaptions(playerCaptions);
+        const result = await matchCaptions(playerCaptions, activeVideoDetails);
         await pushResult(tabId, result);
         return;
       }
@@ -183,6 +185,7 @@ async function handleAnalyzeVideo(tabId, tab, currentTime) {
                       captions: response.captions || null,
                       videoDetails: {
                         title: details.title || null,
+                        shortDescription: details.shortDescription || null,
                         author: details.author || null,
                         videoId: details.videoId || null
                       }
@@ -218,13 +221,17 @@ async function handleAnalyzeVideo(tabId, tab, currentTime) {
       console.warn('[QuranLens] Failed to retrieve playerResponse from MAIN world:', e);
     }
 
+    if (playerResponse && playerResponse.videoDetails) {
+      activeVideoDetails = playerResponse.videoDetails;
+    }
+
     // Secondary path: service worker direct fetch (works when pot= not required)
     if (playerResponse) {
       console.log('[QuranLens BG] Attempting service-worker caption fetch...');
       const bgCaptions = await fetchArabicCaptions(playerResponse, currentTime);
       if (bgCaptions && bgCaptions.length > 10) {
         console.log('[QuranLens BG] Captions retrieved in service worker, running match');
-        const result = await matchCaptions(bgCaptions);
+        const result = await matchCaptions(bgCaptions, activeVideoDetails);
         await pushResult(tabId, result);
         return;
       }
@@ -242,7 +249,7 @@ async function handleAnalyzeVideo(tabId, tab, currentTime) {
       });
 
       if (response && response.type === 'CAPTIONS_RESULT' && response.text) {
-        const result = await matchCaptions(response.text);
+        const result = await matchCaptions(response.text, activeVideoDetails);
         await pushResult(tabId, result);
         return;
       }
@@ -273,15 +280,20 @@ async function handleAnalyzeVideo(tabId, tab, currentTime) {
 
 // ─── Match Captions Against Corpus ──────────────────────────────────────────
 
-async function matchCaptions(text) {
+async function matchCaptions(text, videoDetails) {
   if (!text || text.length < 10) {
     return { type: 'NO_MATCH', message: 'Caption text too short for analysis.' };
   }
 
   try {
-    const result = await findVerse(text);
+    const storageData = await chrome.storage.session.get('lastMatch');
+    const lastMatch = storageData?.lastMatch || null;
+    const surahHint = detectSurahHint(videoDetails);
+
+    const result = await findVerse(text, lastMatch, surahHint);
 
     if (result) {
+      await chrome.storage.session.set({ lastMatch: { surah: result.surah, ayah: result.ayah } });
       return {
         type: 'MATCH_RESULT',
         result: {
@@ -312,6 +324,9 @@ async function pushResult(tabId, result) {
 // ─── Tab URL Change Detection ───────────────────────────────────────────────
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.url) {
+    chrome.storage.session.remove('lastMatch').catch(() => {});
+  }
   if (changeInfo.url && changeInfo.url.includes('youtube.com/watch')) {
     // New video — could notify content script to reset
     chrome.tabs.sendMessage(tabId, { type: 'VIDEO_CHANGED' }).catch(() => {});

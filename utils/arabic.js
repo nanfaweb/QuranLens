@@ -39,15 +39,17 @@ const YEH = '\u064a';
 // Multiple whitespace
 const MULTI_SPACE_RE = /\s+/g;
 
-/**
- * Normalize Arabic text for fuzzy matching.
- * @param {string} text — raw Arabic text
- * @returns {string} — normalized text
- */
 function normalizeArabic(text) {
   if (!text || typeof text !== 'string') return '';
 
   return text
+    .replace(/\u0671/g, '\u0627')
+    .replace(/[\u0622\u0623\u0625]/g, '\u0627')
+    .replace(/\u0624/g, '\u0648')
+    .replace(/\u0626/g, '\u064a')
+    .replace(/\u0621/g, '')
+    .replace(/\u0649/g, '\u064a')
+    .replace(/[،؟؛.]/g, '')
     .replace(TASHKEEL_RE, '')
     .replace(TATWEEL_RE, '')
     .replace(ALEF_VARIANTS_RE, ALEF)

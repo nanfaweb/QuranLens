@@ -74,20 +74,12 @@ function parseJson3CaptionData(data, currentTimeMs) {
   }
 
   const eventTexts = [];
-  const windowRadiusMs = 3 * 1000; // ±2.5 second window (5 seconds total)
 
   for (const event of events) {
     if (currentTimeMs !== undefined) {
       const start = event.tStartMs || 0;
-      const duration = event.dDurationMs || 0;
-      const end = start + duration;
-
-      const windowStart = currentTimeMs - windowRadiusMs;
-      const windowEnd = currentTimeMs + windowRadiusMs;
-
-      // Check overlap
-      const overlaps = (start <= windowEnd && end >= windowStart);
-      if (!overlaps) {
+      const inWindow = (start >= currentTimeMs - 10000 && start <= currentTimeMs);
+      if (!inWindow) {
         continue;
       }
     }
