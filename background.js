@@ -59,8 +59,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return false;
     }
 
-    // Send immediate acknowledgment to prevent channel timeout
-    sendResponse({ type: 'ANALYZING' });
+    // Send immediate acknowledgment to prevent channel timeout (progress starts at 0)
+    sendResponse({ type: 'ANALYZING', progress: 0 });
 
     // Do the actual work asynchronously and push results to the tab
     handleAnalyzeVideo(tabId, sender.tab, message.currentTime, message.videoDetails).catch(err => {
@@ -102,18 +102,21 @@ async function fetchArabicCaptions(playerResponse, currentTime) {
  * @param {number} tabId
  * @param {string} videoId
  * @param {number} [currentTime] — playback time in seconds
+ * @param {boolean} [skipInjection=false] — if true, skip injecting captions_page_fetch.js
  * @returns {Promise<string|null>}
  */
-async function fetchArabicCaptionsViaPlayer(tabId, videoId, currentTime) {
+async function fetchArabicCaptionsViaPlayer(tabId, videoId, currentTime, skipInjection = false) {
   try {
     console.log('[QuranLens BG] Attempting player-context caption fetch (pot token) for currentTime:', currentTime);
 
-    // Chrome requires exactly one of 'files' or 'func' per executeScript call
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      world: 'MAIN',
-      files: ['utils/captions_page_fetch.js']
-    });
+    if (!skipInjection) {
+      // Chrome requires exactly one of 'files' or 'func' per executeScript call
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        world: 'MAIN',
+        files: ['utils/captions_page_fetch.js']
+      });
+    }
 
     const currentTimeMs = currentTime !== undefined ? currentTime * 1000 : undefined;
 
@@ -143,9 +146,51 @@ async function fetchArabicCaptionsViaPlayer(tabId, videoId, currentTime) {
   }
 }
 
+// ─── Caption Deduplication Helper ──────────────────────────────────────────
+
+function deduplicateAndAppend(accumulated, newChunk) {
+  const cleanAccumulated = (accumulated || '').trim().replace(/\s+/g, ' ');
+  const cleanNewChunk = (newChunk || '').trim().replace(/\s+/g, ' ');
+  if (!cleanAccumulated) return cleanNewChunk;
+  if (!cleanNewChunk) return cleanAccumulated;
+
+  if (cleanAccumulated.includes(cleanNewChunk)) {
+    return cleanAccumulated;
+  }
+
+  const accumWords = cleanAccumulated.split(' ');
+  const newWords = cleanNewChunk.split(' ');
+
+  const maxOverlap = Math.min(10, accumWords.length, newWords.length);
+  let bestOverlap = 0;
+
+  for (let len = 1; len <= maxOverlap; len++) {
+    const suffix = accumWords.slice(accumWords.length - len).join(' ');
+    const prefix = newWords.slice(0, len).join(' ');
+
+    if (suffix === prefix) {
+      bestOverlap = len;
+    }
+  }
+
+  const nonOverlappingTail = newWords.slice(bestOverlap).join(' ');
+  if (!nonOverlappingTail) {
+    return cleanAccumulated;
+  }
+  return (cleanAccumulated + ' ' + nonOverlappingTail).trim();
+}
+
 // ─── Handler: Analyze Video ─────────────────────────────────────────────────
 
 async function handleAnalyzeVideo(tabId, tab, currentTime, videoDetails) {
+  let intervalId = null;
+  const cleanup = () => {
+    if (intervalId) {
+      clearInterval(intervalId);
+      intervalId = null;
+    }
+  };
+
   try {
     if (!tab || !tab.url || !tab.url.includes('youtube.com/watch')) {
       await pushResult(tabId, { type: 'ERROR', message: 'Please open a YouTube video first.' });
@@ -157,14 +202,15 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, videoDetails) {
 
     let activeVideoDetails = videoDetails || null;
 
-    // Primary path: player-generated timedtext URL with pot= (fixes empty JSON body)
-    if (videoId) {
-      const playerCaptions = await fetchArabicCaptionsViaPlayer(tabId, videoId, currentTime);
-      if (playerCaptions && playerCaptions.length > 10) {
-        const result = await matchCaptions(playerCaptions, activeVideoDetails);
-        await pushResult(tabId, result);
-        return;
-      }
+    // Inject captions_page_fetch.js ONCE before the loop starts
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        world: 'MAIN',
+        files: ['utils/captions_page_fetch.js']
+      });
+    } catch (e) {
+      console.warn('[QuranLens BG] Initial captions_page_fetch.js injection failed (movie_player not ready), continuing:', e.message);
     }
 
     // Retrieve player response from MAIN world (with retries for SPA navigation)
@@ -225,51 +271,152 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, videoDetails) {
       activeVideoDetails = playerResponse.videoDetails;
     }
 
-    // Secondary path: service worker direct fetch (works when pot= not required)
-    if (playerResponse) {
-      console.log('[QuranLens BG] Attempting service-worker caption fetch...');
-      const bgCaptions = await fetchArabicCaptions(playerResponse, currentTime);
-      if (bgCaptions && bgCaptions.length > 10) {
-        console.log('[QuranLens BG] Captions retrieved in service worker, running match');
-        const result = await matchCaptions(bgCaptions, activeVideoDetails);
-        await pushResult(tabId, result);
-        return;
-      }
-      console.log('[QuranLens BG] Service-worker caption fetch did not yield usable text, falling back to content script');
-    } else {
-      console.log('[QuranLens BG] No playerResponse — falling back to content script');
-    }
+    const scanStartTime = Date.now();
+    const scanDuration = 10000;
+    let accumulatedText = '';
+    let bestResult = null;
+    let stabilityCount = 0;
+    let lastMatchKey = null;
 
-    // Fallback: content script (page context) caption extraction
-    try {
-      const response = await chrome.tabs.sendMessage(tabId, { 
-        type: 'FETCH_CAPTIONS',
-        playerResponse: playerResponse,
-        currentTime: currentTime
-      });
+    const startAnchorTimeMs = currentTime * 1000;
+    let inTick = false;
 
-      if (response && response.type === 'CAPTIONS_RESULT' && response.text) {
-        const result = await matchCaptions(response.text, activeVideoDetails);
-        await pushResult(tabId, result);
-        return;
-      }
-    } catch (e) {
-      console.warn('[QuranLens BG] Content script caption fetch failed:', e);
-    }
+    await new Promise((resolve) => {
+      intervalId = setInterval(async () => {
+        if (inTick) return;
+        inTick = true;
 
-    // All caption paths failed — send the specific no-captions message
-    await pushResult(tabId, {
-      type: 'NO_CAPTIONS',
-      message: 'No Arabic captions found for this video. Try a video from a channel that provides Arabic subtitles.'
+        try {
+          const elapsed = Date.now() - scanStartTime;
+          const progress = Math.min(Math.round((elapsed / scanDuration) * 100), 99);
+
+          try {
+            await chrome.tabs.sendMessage(tabId, { type: 'ANALYZING', progress });
+          } catch (e) {
+            console.warn('[QuranLens BG] Heartbeat send failed:', e.message);
+          }
+
+          const currentTickTimeSec = (startAnchorTimeMs + elapsed) / 1000;
+          let newCaptions = null;
+
+          // Tier 1: Player context
+          if (videoId) {
+            try {
+              newCaptions = await fetchArabicCaptionsViaPlayer(tabId, videoId, currentTickTimeSec, true);
+            } catch (e) {
+              console.warn('[QuranLens BG] Tier 1 injection/fetch error, continuing:', e.message);
+            }
+          }
+
+          // Tier 2: Service worker direct fetch
+          if ((!newCaptions || newCaptions.length <= 10) && playerResponse) {
+            try {
+              newCaptions = await fetchArabicCaptions(playerResponse, currentTickTimeSec);
+            } catch (e) {
+              console.warn('[QuranLens BG] Tier 2 fetch error:', e.message);
+            }
+          }
+
+          // Tier 3: Content script fallback
+          if (!newCaptions || newCaptions.length <= 10) {
+            try {
+              const response = await chrome.tabs.sendMessage(tabId, {
+                type: 'FETCH_CAPTIONS',
+                playerResponse: playerResponse,
+                currentTime: currentTickTimeSec
+              });
+              if (response && response.type === 'CAPTIONS_RESULT' && response.text) {
+                newCaptions = response.text;
+              }
+            } catch (e) {
+              console.warn('[QuranLens BG] Tier 3 fetch error:', e.message);
+            }
+          }
+
+          if (newCaptions && newCaptions.length > 0) {
+            accumulatedText = deduplicateAndAppend(accumulatedText, newCaptions);
+          }
+
+          if (accumulatedText && accumulatedText.trim().length > 0) {
+            const matchResponse = await matchCaptions(accumulatedText, activeVideoDetails);
+            if (matchResponse && matchResponse.type === 'MATCH_RESULT' && matchResponse.result) {
+              const result = matchResponse.result;
+              const currentKey = `${result.surah}:${result.ayah}`;
+
+              if (currentKey === lastMatchKey) {
+                stabilityCount++;
+              } else {
+                stabilityCount = 1;
+                lastMatchKey = currentKey;
+              }
+
+              if (result.confidence > (bestResult?.confidence ?? 0)) {
+                bestResult = result;
+              }
+            }
+          }
+
+          if (stabilityCount >= 3 && bestResult && bestResult.confidence >= 0.82) {
+            console.log('[QuranLens BG] Early exit: stable match confirmed:', lastMatchKey, 'confidence:', bestResult.confidence);
+            cleanup();
+            resolve();
+            return;
+          }
+
+          if (elapsed >= scanDuration) {
+            cleanup();
+            resolve();
+            return;
+          }
+        } catch (err) {
+          console.error('[QuranLens BG] Error in polling loop tick:', err);
+        } finally {
+          inTick = false;
+        }
+      }, 800);
     });
 
+    let finalResult = null;
+    if (bestResult) {
+      finalResult = {
+        type: 'MATCH_RESULT',
+        result: bestResult
+      };
+      await chrome.storage.session.set({ lastMatch: { surah: bestResult.surah, ayah: bestResult.ayah } });
+    } else if (accumulatedText && accumulatedText.trim().length > 0) {
+      finalResult = {
+        type: 'NO_MATCH',
+        message: 'No Quran recitation detected in the captions.'
+      };
+    } else {
+      finalResult = {
+        type: 'NO_CAPTIONS',
+        message: 'No Arabic captions found for this video. Try a video from a channel that provides Arabic subtitles.'
+      };
+    }
+
+    await pushResult(tabId, finalResult);
+
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        world: 'MAIN',
+        func: () => {
+          window.dispatchEvent(new CustomEvent('quranlens-reset-buffer'));
+        }
+      });
+    } catch (e) {
+      console.warn('[QuranLens BG] Failed to dispatch reset buffer event:', e.message);
+    }
+
   } catch (err) {
+    cleanup();
     console.error('[QuranLens BG] Analyze error:', err);
 
     if (err.message && err.message.includes('Could not establish connection')) {
-      await pushResult(tabId, { 
-        type: 'ERROR', 
-        message: 'Content script not ready. Please refresh the YouTube page and try again.' 
+      await pushResult(tabId, {
+        type: 'ERROR',
+        message: 'Content script not ready. Please refresh the YouTube page and try again.'
       });
       return;
     }
@@ -309,17 +456,11 @@ async function matchCaptions(text, videoDetails) {
     const storageData = await chrome.storage.session.get('lastMatch');
     const lastMatch = storageData?.lastMatch || null;
 
-    // ── FIX 1: surah hint disabled ──────────────────────────────────
-    // Commenting out surah hint extraction to fall back to full corpus
-    // search on every call until the hint logic is re-validated.
-    // const surahHint = detectSurahHint(videoDetails);
     const surahHint = undefined;
-    // ────────────────────────────────────────────────────────────────
 
     const result = await findVerse(joinedText, lastMatch, surahHint);
 
     if (result) {
-      await chrome.storage.session.set({ lastMatch: { surah: result.surah, ayah: result.ayah } });
       return {
         type: 'MATCH_RESULT',
         result: {

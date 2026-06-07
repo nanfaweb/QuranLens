@@ -50,7 +50,32 @@ function initQuranLens() {
     // Bind events
     bindEvents(panel);
 
+    // Load and apply overlay position
+    loadOverlayPosition();
+
     console.log(`${QL_LOG} Overlay injected`);
+  }
+
+  function loadOverlayPosition() {
+    chrome.storage.local.get('ql_overlay_pos', (data) => {
+      const pos = data?.ql_overlay_pos;
+      const overlayWidth = 360;
+      const defaultLeft = window.innerWidth - overlayWidth - 20;
+      const defaultTop = 80;
+
+      let left = defaultLeft;
+      let top = defaultTop;
+
+      if (pos && typeof pos.top === 'number' && typeof pos.left === 'number') {
+        left = pos.left;
+        top = pos.top;
+      }
+
+      if (overlayRoot) {
+        overlayRoot.style.left = `${left}px`;
+        overlayRoot.style.top = `${top}px`;
+      }
+    });
   }
 
   function getOverlayCSS() {
@@ -60,8 +85,6 @@ function initQuranLens() {
       :host {
         all: initial;
         position: fixed;
-        top: 0;
-        right: 0;
         z-index: 2147483647;
         pointer-events: none;
       }
@@ -96,9 +119,9 @@ function initQuranLens() {
         --radius-lg: 16px;
         --radius-full: 9999px;
 
-        position: fixed;
-        top: 80px;
-        right: 20px;
+        position: absolute;
+        top: 0;
+        left: 0;
         width: 360px;
         max-height: calc(100vh - 120px);
         overflow-y: auto;
@@ -120,6 +143,7 @@ function initQuranLens() {
         opacity: 1;
         transition: transform 0.35s cubic-bezier(0.16, 1, 0.3, 1),
                     opacity 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+        user-select: none;
       }
 
       .ql-panel::-webkit-scrollbar { width: 4px; }
@@ -144,7 +168,7 @@ function initQuranLens() {
         border-bottom: 1px solid rgba(16, 185, 129, 0.1);
         position: relative;
         overflow: hidden;
-        cursor: default;
+        cursor: grab;
         user-select: none;
       }
 
@@ -601,6 +625,22 @@ function initQuranLens() {
         letter-spacing: 0.5px;
       }
 
+      .ql-progress-container {
+        width: 100%;
+        height: 6px;
+        background: rgba(16, 185, 129, 0.1);
+        border-radius: 4px;
+        margin-top: 12px;
+        overflow: hidden;
+      }
+      .ql-progress-bar {
+        width: 0%;
+        height: 100%;
+        background-color: #1D9E75;
+        border-radius: 4px;
+        transition: width 0.5s ease;
+      }
+
       /* ─── Animations ──────────────────────────────────────────────── */
       .ql-fade-in {
         animation: ql-fade-in 0.3s ease forwards;
@@ -687,8 +727,11 @@ function initQuranLens() {
             <div class="ql-waveform-bar"></div>
             <div class="ql-waveform-bar"></div>
           </div>
-          <div class="ql-loading-text">Analyzing recitation...</div>
+          <div class="ql-loading-text" id="ql-loading-text">Analyzing recitation...</div>
           <div class="ql-loading-subtext">Searching captions & matching verses</div>
+          <div class="ql-progress-container">
+            <div class="ql-progress-bar" id="ql-progress-bar"></div>
+          </div>
         </div>
 
         <!-- State: Result -->
@@ -800,6 +843,63 @@ function initQuranLens() {
         chrome.runtime.sendMessage({ type: 'OPEN_QURAN', url: currentResult.url });
       }
     });
+
+    // Drag-and-drop overlay listeners
+    const header = panel.querySelector('.ql-header');
+    let isDragging = false;
+    let dragStartX = 0;
+    let dragStartY = 0;
+
+    header.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return; // Only left click
+
+      isDragging = true;
+      const rect = overlayRoot.getBoundingClientRect();
+      dragStartX = e.clientX - rect.left;
+      dragStartY = e.clientY - rect.top;
+
+      document.body.style.cursor = 'grabbing';
+      const originalUserSelect = document.body.style.userSelect;
+      document.body.style.userSelect = 'none';
+
+      const onMouseMove = (moveEvent) => {
+        if (!isDragging) return;
+
+        let left = moveEvent.clientX - dragStartX;
+        let top = moveEvent.clientY - dragStartY;
+
+        const overlayWidth = 360;
+        const overlayHeight = panel.offsetHeight || 300;
+
+        // Clamp to viewport
+        left = Math.max(0, Math.min(left, window.innerWidth - overlayWidth));
+        top = Math.max(0, Math.min(top, window.innerHeight - overlayHeight));
+
+        overlayRoot.style.left = `${left}px`;
+        overlayRoot.style.top = `${top}px`;
+      };
+
+      const onMouseUp = () => {
+        isDragging = false;
+        document.body.style.cursor = '';
+        document.body.style.userSelect = originalUserSelect;
+
+        document.removeEventListener('mousemove', onMouseMove);
+        document.removeEventListener('mouseup', onMouseUp);
+
+        // Save position
+        const finalRect = overlayRoot.getBoundingClientRect();
+        chrome.storage.local.set({
+          ql_overlay_pos: {
+            top: finalRect.top,
+            left: finalRect.left
+          }
+        });
+      };
+
+      document.addEventListener('mousemove', onMouseMove);
+      document.addEventListener('mouseup', onMouseUp);
+    });
   }
 
   // ─── State Management ─────────────────────────────────────────────────
@@ -851,7 +951,15 @@ function initQuranLens() {
 
   async function startAnalysis() {
     setState('loading');
-    
+
+    // Reset progress bar to 0% and label to "Analyzing recitation..."
+    if (shadowRoot) {
+      const bar = shadowRoot.getElementById('ql-progress-bar');
+      if (bar) bar.style.width = '0%';
+      const label = shadowRoot.getElementById('ql-loading-text');
+      if (label) label.textContent = 'Analyzing recitation...';
+    }
+
     // Query the active video element to get current playback time (in seconds)
     const video = document.querySelector('video');
     const currentTime = video ? video.currentTime : 0;
@@ -963,7 +1071,29 @@ function initQuranLens() {
         return false;
 
       case 'ANALYZING':
-        // Acknowledgment from background — stay in loading state
+        // If overlay is not in loading state, transition to it
+        showOverlay();
+        if (currentState !== 'loading') {
+          setState('loading');
+        }
+        
+        // Update progress bar width and label via direct DOM mutation
+        if (shadowRoot) {
+          const bar = shadowRoot.getElementById('ql-progress-bar');
+          if (bar) {
+            const progress = typeof message.progress === 'number' ? message.progress : 0;
+            bar.style.width = `${progress}%`;
+            
+            const label = shadowRoot.getElementById('ql-loading-text');
+            if (label) {
+              if (progress === 99) {
+                label.textContent = "Finalizing match...";
+              } else {
+                label.textContent = `Scanning... ${progress}%`;
+              }
+            }
+          }
+        }
         return false;
 
       case 'VIDEO_CHANGED':
@@ -972,6 +1102,8 @@ function initQuranLens() {
         if (isVisible) {
           setState('idle');
         }
+        // On VIDEO_CHANGED: restore position from storage (do not reset to default)
+        loadOverlayPosition();
         return false;
 
       default:
