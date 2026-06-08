@@ -957,7 +957,7 @@ function initQuranLens() {
       const bar = shadowRoot.getElementById('ql-progress-bar');
       if (bar) bar.style.width = '0%';
       const label = shadowRoot.getElementById('ql-loading-text');
-      if (label) label.textContent = 'Analyzing recitation...';
+      if (label) label.textContent = 'Listening...';
     }
 
     // Query the active video element to get current playback time (in seconds)
@@ -1081,15 +1081,29 @@ function initQuranLens() {
         if (shadowRoot) {
           const bar = shadowRoot.getElementById('ql-progress-bar');
           if (bar) {
-            const progress = typeof message.progress === 'number' ? message.progress : 0;
-            bar.style.width = `${progress}%`;
+            let displayProgress;
+            if (message.confidence != null) {
+              displayProgress = message.progress === 99
+                ? 99
+                : Math.min(99, Math.round(20 + message.confidence * 60));
+            } else if (typeof message.progress === 'number' && message.progress > 0) {
+              displayProgress = message.progress;
+            } else {
+              displayProgress = message.progress ?? 0;
+            }
+            bar.style.width = `${displayProgress}%`;
             
             const label = shadowRoot.getElementById('ql-loading-text');
             if (label) {
-              if (progress === 99) {
-                label.textContent = "Finalizing match...";
+              if (displayProgress === 99) {
+                label.textContent = 'Finalizing match...';
+              } else if (message.confidence != null) {
+                const confPercent = Math.round(message.confidence * 100);
+                label.textContent = `Verifying... (${confPercent}% confident)`;
+              } else if (displayProgress > 0) {
+                label.textContent = 'Analysing...';
               } else {
-                label.textContent = `Scanning... ${progress}%`;
+                label.textContent = 'Listening...';
               }
             }
           }

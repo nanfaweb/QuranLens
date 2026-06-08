@@ -261,7 +261,7 @@
           const parsed = parseJson3ToTranscript(capturedJson3Text, currentTimeMs);
           if (parsed.transcript) {
             console.log(LOG, 'captured via fetch hook, length:', parsed.transcript.length);
-            return parsed.transcript;
+            return { captions: parsed.transcript, signedUrl: capturedUrl || '' };
           }
         }
 
@@ -270,7 +270,7 @@
           const parsed = await fetchTranscriptFromUrl(url, currentTimeMs);
           if (parsed.transcript) {
             console.log(LOG, 'fetched timedtext URL, length:', parsed.transcript.length);
-            return parsed.transcript;
+            return { captions: parsed.transcript, signedUrl: capturedUrl || url || '' };
           }
           console.warn(LOG, 'timedtext URL fetch failed:', parsed.error);
         }
