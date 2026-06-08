@@ -1040,9 +1040,16 @@ function initQuranLens() {
     currentResult = result;
     const $ = (id) => shadowRoot.getElementById(id);
 
-    $('ql-surah-arabic').textContent = '';
-    $('ql-surah-english').textContent = 'Multiple surahs — context unclear';
-    $('ql-surah-meta').textContent = '';
+    const surahInfo = result.surahName || {};
+    if (result.surah === 55) {
+      $('ql-surah-arabic').textContent = surahInfo.arabic || `سورة ${result.surah}`;
+      $('ql-surah-english').textContent = surahInfo.english || 'Surah Ar-Rahman';
+      $('ql-surah-meta').textContent = `Surah ${result.surah} · Ayah ${result.ayah}`;
+    } else {
+      $('ql-surah-arabic').textContent = '';
+      $('ql-surah-english').textContent = 'Multiple surahs — context unclear';
+      $('ql-surah-meta').textContent = '';
+    }
 
     const confPercent = Math.round((result.confidence || 0) * 100);
     $('ql-conf-value').textContent = `${confPercent}%`;
@@ -1063,7 +1070,9 @@ function initQuranLens() {
 
     const note = $('ql-ambiguous-note');
     if (note) {
-      note.textContent = 'This verse appears identically in multiple surahs. The recitation context was insufficient to determine which. Try analysing a few seconds earlier or later.';
+      note.textContent = result.surah === 55
+        ? 'This verse repeats throughout Surah Ar-Rahman. Analyse again for a more precise ayah match.'
+        : 'This verse appears identically in multiple surahs. The recitation context was insufficient to determine which. Try analysing a few seconds earlier or later.';
       note.style.display = 'block';
     }
 
