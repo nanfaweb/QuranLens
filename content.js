@@ -736,7 +736,7 @@ function initQuranLens() {
 
         <!-- State: Result -->
         <div class="ql-state ql-result" id="ql-state-result">
-          <div class="ql-result-card">
+          <div class="ql-result-card" id="ql-result-card">
             <div class="ql-surah-header">
               <div class="ql-surah-arabic" id="ql-surah-arabic" dir="rtl"></div>
               <div class="ql-surah-english" id="ql-surah-english"></div>
@@ -751,6 +751,7 @@ function initQuranLens() {
             </div>
             <div class="ql-divider"></div>
             <div class="ql-ayah-text" id="ql-ayah-text" dir="rtl"></div>
+            <div id="ql-ambiguous-note" style="display:none; font-size:11px; color:#BA7517; text-align:center; margin-top:8px; line-height:1.4; opacity:0.85;"></div>
           </div>
           <div class="ql-result-actions">
             <button id="ql-btn-quran" class="ql-btn-primary ql-btn-quran">
@@ -1022,6 +1023,56 @@ function initQuranLens() {
     // Ayah text — from local corpus (no API call)
     $('ql-ayah-text').textContent = result.text || `﴿ ${result.surah}:${result.ayah} ﴾`;
 
+    // Reset ambiguous UI artifacts
+    const card = $('ql-result-card');
+    if (card) card.style.borderTop = '';
+    const note = $('ql-ambiguous-note');
+    if (note) note.style.display = 'none';
+    const quranBtn = $('ql-btn-quran');
+    if (quranBtn) quranBtn.style.display = '';
+
+    setState('result');
+  }
+
+  function renderAmbiguousResult(result) {
+    if (!result) return;
+
+    currentResult = result;
+    const $ = (id) => shadowRoot.getElementById(id);
+
+    $('ql-surah-arabic').textContent = '';
+    $('ql-surah-english').textContent = 'Multiple surahs — context unclear';
+    $('ql-surah-meta').textContent = '';
+
+    const confPercent = Math.round((result.confidence || 0) * 100);
+    $('ql-conf-value').textContent = `${confPercent}%`;
+
+    const isLow = result.confidence < 0.75;
+    const fill = $('ql-conf-fill');
+    fill.className = `ql-confidence-fill ${isLow ? 'medium' : 'high'}`;
+    setTimeout(() => { fill.style.width = `${confPercent}%`; }, 80);
+
+    const badge = $('ql-conf-badge');
+    if (result.confidence >= 0.60 && result.confidence < 0.75) {
+      badge.classList.add('ql-show');
+    } else {
+      badge.classList.remove('ql-show');
+    }
+
+    $('ql-ayah-text').textContent = result.text || `﴿ ${result.surah}:${result.ayah} ﴾`;
+
+    const note = $('ql-ambiguous-note');
+    if (note) {
+      note.textContent = 'This verse appears identically in multiple surahs. The recitation context was insufficient to determine which. Try analysing a few seconds earlier or later.';
+      note.style.display = 'block';
+    }
+
+    const quranBtn = $('ql-btn-quran');
+    if (quranBtn) quranBtn.style.display = 'none';
+
+    const card = $('ql-result-card');
+    if (card) card.style.borderTop = '2px solid #BA7517';
+
     setState('result');
   }
 
@@ -1051,7 +1102,11 @@ function initQuranLens() {
 
       case 'MATCH_RESULT':
         showOverlay();
-        renderResult(message.result);
+        if (message.ambiguous) {
+          renderAmbiguousResult(message.result);
+        } else {
+          renderResult(message.result);
+        }
         window.dispatchEvent(new CustomEvent('quranlens-reset-buffer'));
         return false;
 

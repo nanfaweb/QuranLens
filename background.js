@@ -397,6 +397,7 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, videoDetails) {
     let stabilityCount = 0;
     let lastMatchKey = null;
     let lastMatchedTextLength = 0;
+    let lastMatchWasTied = false;
     let hasReceivedCaptions = false;
     let captionsFirstArrivedAt = null;
     let isFirstTick = true;
@@ -422,7 +423,7 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, videoDetails) {
 
           // ── Optimisation 5: Pre-fetch match (read-only) ──
           const wordCountBefore = getWordCount(accumulatedText);
-          if (wordCountBefore >= 6) {
+          if (wordCountBefore >= 6 && !lastMatchWasTied) {
             const earlyResponse = await matchCaptions(accumulatedText, activeVideoDetails);
             if (earlyResponse && earlyResponse.type === 'MATCH_RESULT' && earlyResponse.result) {
               const earlyKey = `${earlyResponse.result.surah}:${earlyResponse.result.ayah}`;
@@ -500,21 +501,32 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, videoDetails) {
             const matchResponse = await matchCaptions(accumulatedText, activeVideoDetails);
             if (matchResponse && matchResponse.type === 'MATCH_RESULT' && matchResponse.result) {
               const result = matchResponse.result;
-              const currentKey = `${result.surah}:${result.ayah}`;
 
-              if (currentKey === lastMatchKey) {
-                if (wordCount > lastMatchedTextLength) {
-                  stabilityCount++;
+              if (result.tied) {
+                lastMatchWasTied = true;
+                stabilityCount = 0;
+                if (result.confidence > (bestResult?.confidence ?? 0)) {
+                  bestResult = result;
                 }
+                console.log('[QuranLens BG] Tied candidates detected — suppressing early exit, continuing scan');
               } else {
-                stabilityCount = 1;
-                lastMatchKey = currentKey;
-              }
+                lastMatchWasTied = false;
+                const currentKey = `${result.surah}:${result.ayah}`;
 
-              if (result.confidence > (bestResult?.confidence ?? 0)) {
-                bestResult = result;
+                if (currentKey === lastMatchKey) {
+                  if (wordCount > lastMatchedTextLength) {
+                    stabilityCount++;
+                  }
+                } else {
+                  stabilityCount = 1;
+                  lastMatchKey = currentKey;
+                }
+
+                if (result.confidence > (bestResult?.confidence ?? 0)) {
+                  bestResult = result;
+                }
+                lastMatchedTextLength = wordCount;
               }
-              lastMatchedTextLength = wordCount;
             }
           }
 
@@ -522,7 +534,7 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, videoDetails) {
           await sendAnalyzingHeartbeat(tabId, hasReceivedCaptions, bestResult, false);
 
           // ── Optimisation 4: Tiered early-exit after post-fetch ──
-          if (shouldEarlyExit(stabilityCount, bestResult)) {
+          if (!lastMatchWasTied && shouldEarlyExit(stabilityCount, bestResult)) {
             console.log('[QuranLens BG] Early exit: stable match confirmed:', lastMatchKey, 'confidence:', bestResult.confidence);
             scanComplete = true;
             await sendAnalyzingHeartbeat(tabId, hasReceivedCaptions, bestResult, true);
@@ -553,11 +565,15 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, videoDetails) {
 
     let finalResult = null;
     if (bestResult) {
+      const stillTied = bestResult.tied === true && lastMatchWasTied === true;
       finalResult = {
         type: 'MATCH_RESULT',
-        result: bestResult
+        result: bestResult,
+        ambiguous: stillTied
       };
-      await chrome.storage.session.set({ lastMatch: { surah: bestResult.surah, ayah: bestResult.ayah } });
+      if (!stillTied) {
+        await chrome.storage.session.set({ lastMatch: { surah: bestResult.surah, ayah: bestResult.ayah } });
+      }
     } else if (accumulatedText && accumulatedText.trim().length > 0) {
       finalResult = {
         type: 'NO_MATCH',

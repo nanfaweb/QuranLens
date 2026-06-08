@@ -456,6 +456,7 @@ async function findVerse(transcriptText, lastMatch, surahHint) {
     }
 
     const subwindowResults = [];
+    const rankedCandidatesRaw = [];
 
     for (const subwindow of subwindows) {
       let bestMatchForSub = null;
@@ -508,6 +509,14 @@ async function findVerse(transcriptText, lastMatch, surahHint) {
         // Temporary debug log
         console.log("[QuranLens] top candidate:", verse.surah, verse.ayah, "score:", confidence, "threshold:", minConfidence);
 
+        if (confidence > minConfidence) {
+          rankedCandidatesRaw.push({
+            surah: verse.surah,
+            ayah: verse.ayah,
+            confidence: Math.round(confidence * 100) / 100
+          });
+        }
+
         if (confidence > bestConfForSub && confidence > minConfidence) {
           bestConfForSub = confidence;
           const surahInfo = SURAH_INFO[verse.surah] || { arabic: '', english: '', ayahCount: 0 };
@@ -528,6 +537,31 @@ async function findVerse(transcriptText, lastMatch, surahHint) {
 
     if (subwindowResults.length === 0) {
       return null;
+    }
+
+    // Dedupe ranked candidates by surah:ayah, keeping highest confidence per key
+    const candidateByKey = new Map();
+    for (const c of rankedCandidatesRaw) {
+      const cKey = `${c.surah}:${c.ayah}`;
+      const existing = candidateByKey.get(cKey);
+      if (!existing || c.confidence > existing.confidence) {
+        candidateByKey.set(cKey, c);
+      }
+    }
+    const rankedCandidates = Array.from(candidateByKey.values())
+      .sort((a, b) => b.confidence - a.confidence);
+
+    let tied = false;
+    if (rankedCandidates.length > 1) {
+      const topScore = rankedCandidates[0].confidence;
+      const TIE_THRESHOLD = 0.02;
+      const tiedCandidates = rankedCandidates.filter(
+        c => (topScore - c.confidence) <= TIE_THRESHOLD
+      );
+      tied = tiedCandidates.length > 1;
+      if (tied) {
+        console.log('[QuranLens Matcher] Tie detected among', tiedCandidates.length, 'candidates');
+      }
     }
 
     // Sort subwindowResults by confidence descending
@@ -551,7 +585,8 @@ async function findVerse(transcriptText, lastMatch, surahHint) {
 
     return {
       ...topResult,
-      confidence: Math.round(finalConfidence * 100) / 100
+      confidence: Math.round(finalConfidence * 100) / 100,
+      tied: tied || false
     };
   }
 
