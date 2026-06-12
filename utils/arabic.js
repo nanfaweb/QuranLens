@@ -17,10 +17,10 @@
  * @param {string} text — raw Arabic text
  * @returns {string} — normalized text
  */
-function normalizeArabic(text) {
+function normalizeArabic(text, isTranscript = false) {
   if (!text || typeof text !== 'string') return '';
 
-  return text
+  const normalized = text
     // STEP 1 — Remove all diacritics and Quranic annotation marks
     .replace(/[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06DC\u06DF-\u06E8\u06EA-\u06EF\u0640]/g, '')
 
@@ -52,6 +52,30 @@ function normalizeArabic(text) {
     .replace(/[\t\u00A0\u200B\u200C\u200D]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+
+  return isTranscript ? removeStutters(normalized) : normalized;
+}
+
+/**
+ * Remove ASR stutters from normalized text.
+ * @param {string} text
+ * @returns {string}
+ */
+function removeStutters(text) {
+  if (!text) return '';
+  const tokens = text.split(' ');
+  const result = [];
+  for (let i = 0; i < tokens.length; i++) {
+    if (i < tokens.length - 1) {
+      const current = tokens[i];
+      const next = tokens[i + 1];
+      if (current === next || (next.startsWith(current) && current.length >= 3)) {
+        continue;
+      }
+    }
+    result.push(tokens[i]);
+  }
+  return result.join(' ');
 }
 
 // Export normalizeArabic as the sole export of arabic.js

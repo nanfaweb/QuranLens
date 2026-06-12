@@ -394,7 +394,8 @@ async function findVerse(transcriptText, lastMatch, surahHint) {
   }
 
   const corpus = await loadCorpus();
-  const normalizedTranscript = normalizeArabic(transcriptText);
+  const normalizedTranscript = normalizeArabic(transcriptText, true);
+  const transcriptWords = normalizedTranscript.split(/\s+/).filter(Boolean);
   console.log('[QuranLens Matcher] findVerse: Normalized transcript:', normalizedTranscript);
 
   // CHANGE 2.B: Minimum viable transcript gate
@@ -459,11 +460,13 @@ async function findVerse(transcriptText, lastMatch, surahHint) {
     }
 
     const subwindowResults = [];
-    const rankedCandidatesRaw = [];
+    const subwindowCandidatesMap = new Map();
 
-    for (const subwindow of subwindows) {
+    for (let subIdx = 0; subIdx < subwindows.length; subIdx++) {
+      const subwindow = subwindows[subIdx];
       let bestMatchForSub = null;
       let bestConfForSub = 0;
+      const candidatesForThisSub = [];
 
       const candidates = selectCandidates(subwindow, hint);
       for (const idx of candidates) {
@@ -509,14 +512,32 @@ async function findVerse(transcriptText, lastMatch, surahHint) {
           confidence -= 0.10;
         }
 
+        // Missing-word penalty:
+        const candidateWords = ayahText.split(/\s+/).filter(Boolean);
+        const candidateWordCount = candidateWords.length;
+        if (candidateWordCount > 0) {
+          let missingWordCount = 0;
+          for (const word of candidateWords) {
+            if (word.length > 3 && !transcriptWords.includes(word)) {
+              missingWordCount++;
+            }
+          }
+          const missedRatio = missingWordCount / candidateWordCount;
+          if (missedRatio > 0.25) {
+            const multiplier = Math.max(0.70, 1 - (missedRatio * 0.4));
+            confidence *= multiplier;
+          }
+        }
+
         // Temporary debug log
         console.log("[QuranLens] top candidate:", verse.surah, verse.ayah, "score:", confidence, "threshold:", minConfidence);
 
         if (confidence > minConfidence) {
-          rankedCandidatesRaw.push({
+          candidatesForThisSub.push({
             surah: verse.surah,
             ayah: verse.ayah,
-            confidence: Math.round(confidence * 100) / 100
+            confidence: Math.round(confidence * 100) / 100,
+            text: verse.text || ''
           });
         }
 
@@ -534,37 +555,31 @@ async function findVerse(transcriptText, lastMatch, surahHint) {
       }
 
       if (bestMatchForSub) {
-        subwindowResults.push(bestMatchForSub);
+        subwindowResults.push({
+          ...bestMatchForSub,
+          subIdx: subIdx
+        });
       }
+      subwindowCandidatesMap.set(subIdx, candidatesForThisSub);
     }
 
     if (subwindowResults.length === 0) {
       return null;
     }
 
-    // Dedupe ranked candidates by surah:ayah, keeping highest confidence per key
-    const candidateByKey = new Map();
-    for (const c of rankedCandidatesRaw) {
-      const cKey = `${c.surah}:${c.ayah}`;
-      const existing = candidateByKey.get(cKey);
-      if (!existing || c.confidence > existing.confidence) {
-        candidateByKey.set(cKey, c);
+    // Apply subwindow agreement boost to subwindowResults
+    for (const res of subwindowResults) {
+      const cKey = `${res.surah}:${res.ayah}`;
+      let matchCount = 0;
+      for (const other of subwindowResults) {
+        if (`${other.surah}:${other.ayah}` === cKey) {
+          matchCount++;
+        }
       }
-    }
-    const rankedCandidates = Array.from(candidateByKey.values())
-      .sort((a, b) => b.confidence - a.confidence);
-
-    let tied = false;
-    if (rankedCandidates.length > 1) {
-      const topScore = rankedCandidates[0].confidence;
-      const TIE_THRESHOLD = 0.02;
-      const tiedCandidates = rankedCandidates.filter(
-        c => (topScore - c.confidence) <= TIE_THRESHOLD
-      );
-      tied = tiedCandidates.length > 1;
-      if (tied) {
-        console.log('[QuranLens Matcher] Tie detected among', tiedCandidates.length, 'candidates');
+      if (matchCount >= 2) {
+        res.confidence = Math.min(0.99, res.confidence + 0.04);
       }
+      res.confidence = Math.round(res.confidence * 100) / 100;
     }
 
     // Sort subwindowResults by confidence descending
@@ -572,25 +587,77 @@ async function findVerse(transcriptText, lastMatch, surahHint) {
 
     const topResult = subwindowResults[0];
 
-    // If two subwindows return the same surah:ayah, that agreement boosts confidence — add +0.04 to the returned confidence (cap at 0.99)
-    const key = `${topResult.surah}:${topResult.ayah}`;
-    let matchCount = 0;
-    for (const res of subwindowResults) {
-      if (`${res.surah}:${res.ayah}` === key) {
-        matchCount++;
+    // Get candidates for the subwindow that produced topResult
+    const candidatesForBestSub = subwindowCandidatesMap.get(topResult.subIdx) || [];
+
+    // Boost confidence for all candidates in this subwindow for consistent comparison
+    for (const c of candidatesForBestSub) {
+      const cKey = `${c.surah}:${c.ayah}`;
+      let matchCount = 0;
+      for (const res of subwindowResults) {
+        if (`${res.surah}:${res.ayah}` === cKey) {
+          matchCount++;
+        }
+      }
+      if (matchCount >= 2) {
+        c.confidence = Math.min(0.99, c.confidence + 0.04);
+      }
+      c.confidence = Math.round(c.confidence * 100) / 100;
+    }
+
+    // Sort candidates descending
+    candidatesForBestSub.sort((a, b) => b.confidence - a.confidence);
+
+    if (candidatesForBestSub.length === 0) {
+      return null;
+    }
+
+    const highestScore = candidatesForBestSub[0].confidence;
+    const ambiguousSet = candidatesForBestSub.filter(c => (highestScore - c.confidence) <= 0.08);
+
+    if (ambiguousSet.length === 1) {
+      const topCandidate = ambiguousSet[0];
+      const surahInfo = SURAH_INFO[topCandidate.surah] || { arabic: '', english: '', ayahCount: 0 };
+      return {
+        state: "match",
+        surah: topCandidate.surah,
+        ayah: topCandidate.ayah,
+        confidence: topCandidate.confidence,
+        surahName: surahInfo,
+        text: topCandidate.text
+      };
+    } else {
+      const firstNormalizedText = normalizeArabic(ambiguousSet[0].text);
+      const allEqual = ambiguousSet.every(c => normalizeArabic(c.text) === firstNormalizedText);
+
+      if (allEqual) {
+        const tiedCandidates = ambiguousSet.map(c => ({
+          surah: c.surah,
+          ayah: c.ayah,
+          surahName: SURAH_INFO[c.surah] || { arabic: '', english: '', ayahCount: 0 }
+        }));
+        return {
+          state: "tied",
+          candidates: tiedCandidates,
+          surah: ambiguousSet[0].surah,
+          ayah: ambiguousSet[0].ayah,
+          confidence: ambiguousSet[0].confidence,
+          surahName: SURAH_INFO[ambiguousSet[0].surah] || { arabic: '', english: '', ayahCount: 0 },
+          text: ambiguousSet[0].text
+        };
+      } else {
+        return {
+          state: "pending",
+          topCandidate: {
+            surah: candidatesForBestSub[0].surah,
+            ayah: candidatesForBestSub[0].ayah,
+            confidence: candidatesForBestSub[0].confidence,
+            surahName: SURAH_INFO[candidatesForBestSub[0].surah] || { arabic: '', english: '', ayahCount: 0 },
+            text: candidatesForBestSub[0].text
+          }
+        };
       }
     }
-
-    let finalConfidence = topResult.confidence;
-    if (matchCount >= 2) {
-      finalConfidence = Math.min(0.99, finalConfidence + 0.04);
-    }
-
-    return {
-      ...topResult,
-      confidence: Math.round(finalConfidence * 100) / 100,
-      tied: tied || false
-    };
   }
 
   console.time('[QuranLens] Verse matching');

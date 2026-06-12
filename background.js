@@ -17,6 +17,9 @@ const captionUrlCache = new Map(); // videoId → { url, expiresAt }
 const tabLastVideoId = new Map();  // tabId → videoId (for invalidation)
 const CACHE_TTL_MS = 240000;       // 4 minutes
 
+// ─── Disambiguation Buffers ──────────────────────────────────────────────────
+const tabBuffers = {};
+
 // ─── Icon Click → Toggle Overlay ────────────────────────────────────────────
 
 chrome.action.onClicked.addListener(async (tab) => {
@@ -394,13 +397,15 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, videoDetails) {
     const SLOW_SCAN_DURATION = 10000;
     let accumulatedText = '';
     let bestResult = null;
-    let stabilityCount = 0;
-    let lastMatchKey = null;
-    let lastMatchedTextLength = 0;
-    let lastMatchWasTied = false;
     let hasReceivedCaptions = false;
     let captionsFirstArrivedAt = null;
     let isFirstTick = true;
+
+    // Check if previous result was PENDING
+    let isPendingMode = !!tabBuffers[tabId];
+    if (isPendingMode) {
+      accumulatedText = tabBuffers[tabId].text;
+    }
 
     const getEffectiveScanDuration = () => {
       if (!captionsFirstArrivedAt) return SLOW_SCAN_DURATION;
@@ -421,31 +426,15 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, videoDetails) {
           const elapsed = Date.now() - scanStartTime;
           const currentTickTimeSec = (startAnchorTimeMs + elapsed) / 1000;
 
-          // ── Optimisation 5: Pre-fetch match (read-only) ──
-          const wordCountBefore = getWordCount(accumulatedText);
-          if (wordCountBefore >= 6 && !lastMatchWasTied) {
-            const earlyResponse = await matchCaptions(accumulatedText, activeVideoDetails);
-            if (earlyResponse && earlyResponse.type === 'MATCH_RESULT' && earlyResponse.result) {
-              const earlyKey = `${earlyResponse.result.surah}:${earlyResponse.result.ayah}`;
-              if (bestResult === null) {
-                bestResult = earlyResponse.result;
-              }
-              if (earlyKey === lastMatchKey && shouldEarlyExit(stabilityCount, bestResult)) {
-                console.log('[QuranLens BG] Pre-fetch early exit: stable match confirmed:', lastMatchKey, 'confidence:', bestResult.confidence);
-                scanComplete = true;
-                await sendAnalyzingHeartbeat(tabId, hasReceivedCaptions, bestResult, true);
-                cleanup();
-                resolve();
-                return;
-              }
-            }
-          }
+          // Retrieve lastMatch
+          const storageData = await chrome.storage.session.get('lastMatch');
+          const lastMatch = storageData?.lastMatch || null;
 
           // ── Caption fetch tiers ──
           let newCaptions = null;
 
           if (isFirstTick) {
-            // Optimisation 2: parallel tier firing on tick 1
+            // Parallel tier firing on tick 1
             const [t1Result, t2Result, t3Result] = await Promise.allSettled([
               videoId
                 ? fetchArabicCaptionsViaPlayer(tabId, videoId, currentTickTimeSec, true)
@@ -460,7 +449,7 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, videoDetails) {
               r.status === 'fulfilled' && r.value && r.value.length > 10 ? r.value : null;
             newCaptions = pickTier(t1Result) || pickTier(t2Result) || pickTier(t3Result);
           } else {
-            // Tier 1: Player context (cache hit on tick 2+)
+            // Tier 1: Player context
             if (videoId) {
               try {
                 newCaptions = await fetchArabicCaptionsViaPlayer(tabId, videoId, currentTickTimeSec, true);
@@ -485,70 +474,149 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, videoDetails) {
           }
 
           if (newCaptions && newCaptions.length > 0) {
-            accumulatedText = deduplicateAndAppend(accumulatedText, newCaptions);
-            if (!captionsFirstArrivedAt && accumulatedText.trim().length > 0) {
+            if (!captionsFirstArrivedAt) {
               captionsFirstArrivedAt = Date.now();
             }
           }
 
-          if (getWordCount(accumulatedText) >= 6) {
-            hasReceivedCaptions = true;
-          }
-
-          // ── Post-fetch match (sole writer of stability state) ──
-          const wordCount = getWordCount(accumulatedText);
-          if (accumulatedText && accumulatedText.trim().length > 0) {
-            const matchResponse = await matchCaptions(accumulatedText, activeVideoDetails);
-            if (matchResponse && matchResponse.type === 'MATCH_RESULT' && matchResponse.result) {
-              const result = matchResponse.result;
-
-              if (result.tied) {
-                lastMatchWasTied = true;
-                stabilityCount = 0;
-                if (result.confidence > (bestResult?.confidence ?? 0)) {
-                  bestResult = result;
-                }
-                console.log('[QuranLens BG] Tied candidates detected — suppressing early exit, continuing scan');
+          if (isPendingMode) {
+            // Check for timeout if in pending mode (15 seconds since last pending activity / start)
+            const buffer = tabBuffers[tabId];
+            const timeSincePending = Date.now() - buffer.lastPendingTime;
+            if (timeSincePending > 15000) {
+              const lastResult = await findVerse(buffer.text, lastMatch, undefined);
+              const topCandidate = lastResult && lastResult.topCandidate;
+              if (topCandidate) {
+                const lowConf = {
+                  state: "match",
+                  surah: topCandidate.surah,
+                  ayah: topCandidate.ayah,
+                  confidence: topCandidate.confidence,
+                  surahName: topCandidate.surahName,
+                  text: topCandidate.text,
+                  lowConfidence: true
+                };
+                delete tabBuffers[tabId];
+                bestResult = lowConf;
               } else {
-                lastMatchWasTied = false;
-                const currentKey = `${result.surah}:${result.ayah}`;
-
-                if (currentKey === lastMatchKey) {
-                  if (wordCount > lastMatchedTextLength) {
-                    stabilityCount++;
-                  }
-                } else {
-                  stabilityCount = 1;
-                  lastMatchKey = currentKey;
-                }
-
-                if (result.confidence > (bestResult?.confidence ?? 0)) {
-                  bestResult = result;
-                }
-                lastMatchedTextLength = wordCount;
+                delete tabBuffers[tabId];
+                bestResult = null;
               }
+              scanComplete = true;
+              cleanup();
+              resolve();
+              return;
+            }
+
+            if (newCaptions && newCaptions.trim().length > 0) {
+              const oldText = buffer.text;
+              buffer.text = deduplicateAndAppend(buffer.text, newCaptions);
+              if (buffer.text !== oldText) {
+                buffer.attempts++;
+                buffer.lastPendingTime = Date.now();
+              }
+            }
+
+            const wordCnt = getWordCount(buffer.text);
+            if (wordCnt >= 6) {
+              hasReceivedCaptions = true;
+              const result = await findVerse(buffer.text, lastMatch, undefined);
+
+              if (result) {
+                if (result.state === "match") {
+                  delete tabBuffers[tabId];
+                  bestResult = result;
+                  scanComplete = true;
+                  cleanup();
+                  resolve();
+                  return;
+                } else if (result.state === "tied") {
+                  delete tabBuffers[tabId];
+                  bestResult = result;
+                  scanComplete = true;
+                  cleanup();
+                  resolve();
+                  return;
+                } else if (result.state === "pending") {
+                  if (wordCnt >= 50) {
+                    const topCandidate = result.topCandidate;
+                    if (topCandidate) {
+                      const lowConf = {
+                        state: "match",
+                        surah: topCandidate.surah,
+                        ayah: topCandidate.ayah,
+                        confidence: topCandidate.confidence,
+                        surahName: topCandidate.surahName,
+                        text: topCandidate.text,
+                        lowConfidence: true
+                      };
+                      delete tabBuffers[tabId];
+                      bestResult = lowConf;
+                    } else {
+                      delete tabBuffers[tabId];
+                      bestResult = null;
+                    }
+                    scanComplete = true;
+                    cleanup();
+                    resolve();
+                    return;
+                  }
+                  // Otherwise: stay in pending, do not update UI yet
+                }
+              } else {
+                // If it returned null (NO_MATCH) but we reached >= 50 words
+                if (wordCnt >= 50) {
+                  delete tabBuffers[tabId];
+                  bestResult = null;
+                  scanComplete = true;
+                  cleanup();
+                  resolve();
+                  return;
+                }
+              }
+            }
+          } else {
+            // Normal mode (not pending)
+            if (newCaptions && newCaptions.length > 0) {
+              accumulatedText = deduplicateAndAppend(accumulatedText, newCaptions);
+            }
+
+            const wordCnt = getWordCount(accumulatedText);
+            if (wordCnt >= 6) {
+              hasReceivedCaptions = true;
+              const result = await findVerse(accumulatedText, lastMatch, undefined);
+
+              if (result) {
+                if (result.state === "match" || result.state === "tied") {
+                  bestResult = result;
+                  scanComplete = true;
+                  cleanup();
+                  resolve();
+                  return;
+                } else if (result.state === "pending") {
+                  // Initialize buffer
+                  tabBuffers[tabId] = {
+                    text: accumulatedText,
+                    attempts: 1,
+                    lastPendingTime: Date.now()
+                  };
+                  isPendingMode = true;
+                  // Do not update UI yet, just continue loop
+                }
+              }
+            }
+
+            if (elapsed >= getEffectiveScanDuration()) {
+              scanComplete = true;
+              cleanup();
+              resolve();
+              return;
             }
           }
 
-          // ── Heartbeat (signal-driven progress) ──
+          // ── Heartbeat ──
           await sendAnalyzingHeartbeat(tabId, hasReceivedCaptions, bestResult, false);
 
-          // ── Optimisation 4: Tiered early-exit after post-fetch ──
-          if (!lastMatchWasTied && shouldEarlyExit(stabilityCount, bestResult)) {
-            console.log('[QuranLens BG] Early exit: stable match confirmed:', lastMatchKey, 'confidence:', bestResult.confidence);
-            scanComplete = true;
-            await sendAnalyzingHeartbeat(tabId, hasReceivedCaptions, bestResult, true);
-            cleanup();
-            resolve();
-            return;
-          }
-
-          if (elapsed >= getEffectiveScanDuration()) {
-            scanComplete = true;
-            cleanup();
-            resolve();
-            return;
-          }
         } catch (err) {
           console.error('[QuranLens BG] Error in polling loop tick:', err);
         } finally {
@@ -565,10 +633,14 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, videoDetails) {
 
     let finalResult = null;
     if (bestResult) {
-      const stillTied = bestResult.tied === true && lastMatchWasTied === true;
+      const stillTied = bestResult.state === "tied";
       finalResult = {
         type: 'MATCH_RESULT',
-        result: bestResult,
+        result: {
+          ...bestResult,
+          url: getQuranUrl(bestResult.surah, bestResult.ayah),
+          timestamp: Date.now()
+        },
         ambiguous: stillTied
       };
       if (!stillTied) {
@@ -679,11 +751,10 @@ async function pushResult(tabId, result) {
   }
 }
 
-// ─── Tab URL Change Detection ───────────────────────────────────────────────
-
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.url) {
     chrome.storage.session.remove('lastMatch').catch(() => {});
+    delete tabBuffers[tabId];
   }
   if (changeInfo.url && changeInfo.url.includes('youtube.com/watch')) {
     try {
@@ -700,6 +771,11 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 
     chrome.tabs.sendMessage(tabId, { type: 'VIDEO_CHANGED' }).catch(() => {});
   }
+});
+
+// ─── Tab Close Detection ───────────────────────────────────────────────────
+chrome.tabs.onRemoved.addListener((tabId) => {
+  delete tabBuffers[tabId];
 });
 
 console.log('[QuranLens] Service worker initialized.');
