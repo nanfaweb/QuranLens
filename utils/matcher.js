@@ -326,13 +326,16 @@ function selectCandidates(windowText, surahHint) {
 
   if (weightedHits.size === 0) return [];
 
-  // Score by Cosine Similarity using sum of IDF weights
+  // Score by raw IDF-weighted intersection normalized by queryIdfTotal
   const scored = [];
-  const queryCount = queryNgrams.size;
+  let queryIdfTotal = 0;
+  for (const ng of queryNgrams) {
+    queryIdfTotal += _trigramIdf.get(ng) || 0;
+  }
+  if (queryIdfTotal === 0) queryIdfTotal = 1;
 
-  for (const [idx, sumOfIdf] of weightedHits) {
-    const verseCount = _verseNgramCounts[idx];
-    const score = sumOfIdf / Math.sqrt(queryCount * (verseCount || 1));
+  for (const [idx, sumOfMatchedIdf] of weightedHits) {
+    const score = sumOfMatchedIdf / queryIdfTotal;
     // Quick filter: require at least some overlap
     if (score > 0.05) {
       scored.push({ idx, score });
