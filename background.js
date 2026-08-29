@@ -72,7 +72,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ type: 'ANALYZING', progress: 0, confidence: null });
 
     // Do the actual work asynchronously and push results to the tab
-    handleAnalyzeVideo(tabId, sender.tab, message.currentTime, message.videoDetails).catch(err => {
+    handleAnalyzeVideo(tabId, sender.tab, message.currentTime).catch(err => {
       console.error('[QuranLens BG] Analyze error:', err);
       chrome.tabs.sendMessage(tabId, {
         type: 'ERROR',
@@ -302,7 +302,7 @@ function deduplicateAndAppend(accumulated, newChunk) {
 
 // ─── Handler: Analyze Video ─────────────────────────────────────────────────
 
-async function handleAnalyzeVideo(tabId, tab, currentTime, videoDetails) {
+async function handleAnalyzeVideo(tabId, tab, currentTime) {
   let timeoutId = null;
   let scanComplete = false;
   const cleanup = () => {
@@ -320,8 +320,6 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, videoDetails) {
 
     const urlObj = new URL(tab.url);
     const videoId = urlObj.searchParams.get('v');
-
-    let activeVideoDetails = videoDetails || null;
 
     // Inject captions_page_fetch.js ONCE before the loop starts
     try {
@@ -386,10 +384,6 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, videoDetails) {
       }
     } catch (e) {
       console.warn('[QuranLens] Failed to retrieve playerResponse from MAIN world:', e);
-    }
-
-    if (playerResponse && playerResponse.videoDetails) {
-      activeVideoDetails = playerResponse.videoDetails;
     }
 
     const scanStartTime = Date.now();
@@ -484,7 +478,7 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, videoDetails) {
             const buffer = tabBuffers[tabId];
             const timeSincePending = Date.now() - buffer.lastPendingTime;
             if (timeSincePending > 15000) {
-              const lastResult = await findVerse(buffer.text, lastMatch, undefined);
+              const lastResult = await findVerse(buffer.text, lastMatch);
               const topCandidate = lastResult && lastResult.topCandidate;
               if (topCandidate) {
                 const lowConf = {
@@ -520,7 +514,7 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, videoDetails) {
             const wordCnt = getWordCount(buffer.text);
             if (wordCnt >= 6) {
               hasReceivedCaptions = true;
-              const result = await findVerse(buffer.text, lastMatch, undefined);
+              const result = await findVerse(buffer.text, lastMatch);
 
               if (result) {
                 if (result.state === "match") {
@@ -584,7 +578,7 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, videoDetails) {
             const wordCnt = getWordCount(accumulatedText);
             if (wordCnt >= 6) {
               hasReceivedCaptions = true;
-              const result = await findVerse(accumulatedText, lastMatch, undefined);
+              const result = await findVerse(accumulatedText, lastMatch);
 
               if (result) {
                 if (result.state === "match" || result.state === "tied") {
@@ -690,7 +684,7 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, videoDetails) {
 
 // ─── Match Captions Against Corpus ──────────────────────────────────────────
 
-async function matchCaptions(text, videoDetails) {
+async function matchCaptions(text) {
   let joinedText = '';
   if (Array.isArray(text)) {
     joinedText = text.filter(e => e && typeof e === 'string').join(' ').replace(/\s+/g, ' ').trim();
@@ -719,9 +713,7 @@ async function matchCaptions(text, videoDetails) {
     const storageData = await chrome.storage.session.get('lastMatch');
     const lastMatch = storageData?.lastMatch || null;
 
-    const surahHint = undefined;
-
-    const result = await findVerse(joinedText, lastMatch, surahHint);
+    const result = await findVerse(joinedText, lastMatch);
 
     if (result) {
       return {

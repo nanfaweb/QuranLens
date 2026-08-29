@@ -966,22 +966,9 @@ function initQuranLens() {
     const currentTime = video ? video.currentTime : 0;
     console.log(`${QL_LOG} startAnalysis at currentTime:`, currentTime);
 
-    let title = '';
-    let shortDescription = '';
-    try {
-      const playerResponse = await waitForPlayerResponse(3, 100);
-      if (playerResponse && playerResponse.videoDetails) {
-        title = playerResponse.videoDetails.title || '';
-        shortDescription = playerResponse.videoDetails.shortDescription || '';
-      }
-    } catch (e) {
-      console.warn(`${QL_LOG} Failed to get player response for surah hint:`, e);
-    }
-
     chrome.runtime.sendMessage({ 
       type: 'ANALYZE_VIDEO',
-      currentTime: currentTime,
-      videoDetails: { title, shortDescription }
+      currentTime: currentTime
     }).catch(err => {
       console.error(`${QL_LOG} Analysis message error:`, err);
       showError(err.message || 'Failed to communicate with the extension.');
