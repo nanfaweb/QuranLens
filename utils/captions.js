@@ -73,32 +73,49 @@ function parseJson3CaptionData(data, currentTimeMs) {
     return null;
   }
 
-  const eventTexts = [];
+  const lookbackMs = 15000;
+  const lookaheadMs = 8000;
 
-  for (const event of events) {
-    if (currentTimeMs !== undefined) {
-      const start = event.tStartMs || 0;
-      const inWindow = (start >= currentTimeMs - 10000 && start <= currentTimeMs);
-      if (!inWindow) {
-        continue;
-      }
-    }
-
+  function extractEventText(event) {
     const eventSegs = [];
     if (event.segs && Array.isArray(event.segs)) {
       for (const seg of event.segs) {
-        if (seg.utf8) {
-          eventSegs.push(seg.utf8);
-        }
+        if (seg.utf8) eventSegs.push(seg.utf8);
       }
     } else if (event.utf8) {
       eventSegs.push(event.utf8);
     }
+    return eventSegs.join('').replace(/\n/g, ' ').trim();
+  }
 
-    const eventText = eventSegs.join('');
-    if (eventText) {
-      eventTexts.push(eventText.replace(/\n/g, ' ').trim());
+  function eventOverlapsWindow(event, timeMs) {
+    const start = event.tStartMs || 0;
+    const duration = event.dDurationMs || 3000;
+    const end = start + duration;
+    return end >= timeMs - lookbackMs && start <= timeMs + lookaheadMs;
+  }
+
+  const eventTexts = [];
+  for (const event of events) {
+    if (currentTimeMs !== undefined && !eventOverlapsWindow(event, currentTimeMs)) {
+      continue;
     }
+    const eventText = extractEventText(event);
+    if (eventText) eventTexts.push(eventText);
+  }
+
+  if (eventTexts.length === 0 && currentTimeMs !== undefined) {
+    const ranked = events
+      .map(event => {
+        const start = event.tStartMs || 0;
+        const text = extractEventText(event);
+        if (!text) return null;
+        return { text, distance: Math.abs(start - currentTimeMs) };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.distance - b.distance)
+      .slice(0, 8);
+    for (const r of ranked) eventTexts.push(r.text);
   }
 
   const fullTranscript = eventTexts.join(' ').replace(/\s+/g, ' ').trim();

@@ -16,36 +16,44 @@ const CS_LOG = '[QuranLens CS]';
  * @param {number} delayMs — ms between retries
  * @returns {Promise<Object|null>}
  */
-async function waitForPlayerResponse(maxRetries = 5, delayMs = 500) {
+async function waitForPlayerResponse(maxRetries = 5, delayMs = 500, expectedVideoId = null) {
   for (let i = 0; i < maxRetries; i++) {
+    let candidate = null;
+
     if (window.ytInitialPlayerResponse) {
+      candidate = window.ytInitialPlayerResponse;
       console.log(`${CS_LOG} playerResponse from ytInitialPlayerResponse (attempt ${i + 1})`);
-      return window.ytInitialPlayerResponse;
-    }
-
-    if (window.ytplayer && window.ytplayer.config && window.ytplayer.config.args) {
+    } else if (window.ytplayer?.config?.args?.raw_player_response) {
       try {
-        const raw = window.ytplayer.config.args.raw_player_response;
-        if (raw) {
-          console.log(`${CS_LOG} playerResponse from ytplayer.config (attempt ${i + 1})`);
-          return raw;
-        }
+        candidate = window.ytplayer.config.args.raw_player_response;
+        console.log(`${CS_LOG} playerResponse from ytplayer.config (attempt ${i + 1})`);
       } catch (e) { /* ignore */ }
-    }
-
-    try {
-      const scripts = document.querySelectorAll('script');
-      for (const script of scripts) {
-        const text = script.textContent;
-        if (text && text.includes('ytInitialPlayerResponse')) {
-          const match = text.match(/ytInitialPlayerResponse\s*=\s*({.+?});/s);
-          if (match) {
-            console.log(`${CS_LOG} playerResponse parsed from inline script (attempt ${i + 1})`);
-            return JSON.parse(match[1]);
+    } else {
+      try {
+        const scripts = document.querySelectorAll('script');
+        for (const script of scripts) {
+          const text = script.textContent;
+          if (text && text.includes('ytInitialPlayerResponse')) {
+            const match = text.match(/ytInitialPlayerResponse\s*=\s*({.+?});/s);
+            if (match) {
+              candidate = JSON.parse(match[1]);
+              console.log(`${CS_LOG} playerResponse parsed from inline script (attempt ${i + 1})`);
+              break;
+            }
           }
         }
+      } catch (e) { /* ignore parsing errors */ }
+    }
+
+    if (candidate) {
+      const responseVideoId = candidate.videoDetails?.videoId;
+      if (expectedVideoId && responseVideoId && responseVideoId !== expectedVideoId) {
+        console.warn(`${CS_LOG} playerResponse stale (expected ${expectedVideoId}, got ${responseVideoId}), retrying...`);
+        candidate = null;
+      } else {
+        return candidate;
       }
-    } catch (e) { /* ignore parsing errors */ }
+    }
 
     if (i < maxRetries - 1) {
       await new Promise(r => setTimeout(r, delayMs));
@@ -68,9 +76,19 @@ async function getYouTubeCaptions(videoId, passedPlayerResponse, currentTime) {
   try {
     console.log(`${CS_LOG} getYouTubeCaptions start, videoId:`, videoId, "currentTime:", currentTime);
 
-    const playerResponse = passedPlayerResponse || await waitForPlayerResponse();
+    let playerResponse = passedPlayerResponse;
+    const responseVideoId = playerResponse?.videoDetails?.videoId;
+    if (!playerResponse || (videoId && responseVideoId && responseVideoId !== videoId)) {
+      playerResponse = await waitForPlayerResponse(8, 400, videoId);
+    }
     if (!playerResponse) {
       console.warn(`${CS_LOG} getYouTubeCaptions: no playerResponse`);
+      return null;
+    }
+
+    if (videoId && playerResponse.videoDetails?.videoId &&
+        playerResponse.videoDetails.videoId !== videoId) {
+      console.warn(`${CS_LOG} getYouTubeCaptions: playerResponse videoId mismatch`);
       return null;
     }
 
@@ -110,10 +128,14 @@ async function getYouTubeCaptions(videoId, passedPlayerResponse, currentTime) {
  */
 async function getVideoMetadata(passedPlayerResponse) {
   try {
-    const playerResponse = passedPlayerResponse || await waitForPlayerResponse();
-
     const urlParams = new URLSearchParams(window.location.search);
     const videoIdFromUrl = urlParams.get('v');
+
+    let playerResponse = passedPlayerResponse;
+    const responseVideoId = playerResponse?.videoDetails?.videoId;
+    if (!playerResponse || (videoIdFromUrl && responseVideoId && responseVideoId !== videoIdFromUrl)) {
+      playerResponse = await waitForPlayerResponse(8, 400, videoIdFromUrl);
+    }
 
     if (!playerResponse) {
       if (videoIdFromUrl) {
@@ -129,6 +151,15 @@ async function getVideoMetadata(passedPlayerResponse) {
     }
 
     const videoDetails = playerResponse.videoDetails || {};
+
+    if (videoIdFromUrl && videoDetails.videoId && videoDetails.videoId !== videoIdFromUrl) {
+      console.warn(`${CS_LOG} getVideoMetadata: stale playerResponse, using URL videoId`);
+      return {
+        title: document.title || '',
+        channelName: '',
+        videoId: videoIdFromUrl
+      };
+    }
 
     const meta = {
       title: videoDetails.title || document.title || '',

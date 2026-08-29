@@ -25,6 +25,8 @@ function initQuranLens() {
   let currentState = 'idle';
   let currentResult = null;
   let isVisible = false;
+  let activeAnalysisSession = null;
+  let lastKnownVideoId = null;
 
   // ─── Overlay Injection ──────────────────────────────────────────────────
 
@@ -905,6 +907,35 @@ function initQuranLens() {
 
   // ─── State Management ─────────────────────────────────────────────────
 
+  function getVideoIdFromUrl() {
+    return new URLSearchParams(window.location.search).get('v');
+  }
+
+  function isStaleAnalysisMessage(message) {
+    return message.session !== undefined &&
+      activeAnalysisSession !== null &&
+      message.session !== activeAnalysisSession;
+  }
+
+  function resetForVideoChange() {
+    activeAnalysisSession = null;
+    currentResult = null;
+    lastKnownVideoId = getVideoIdFromUrl();
+    if (isVisible) {
+      setState('idle');
+    }
+    loadOverlayPosition();
+  }
+
+  function notifyVideoNavigation() {
+    const videoId = getVideoIdFromUrl();
+    if (!videoId || videoId === lastKnownVideoId) return;
+    lastKnownVideoId = videoId;
+    console.log(`${QL_LOG} Video navigation detected:`, videoId);
+    resetForVideoChange();
+    chrome.runtime.sendMessage({ type: 'VIDEO_NAVIGATED' }).catch(() => {});
+  }
+
   function setState(stateName) {
     currentState = stateName;
 
@@ -969,6 +1000,10 @@ function initQuranLens() {
     chrome.runtime.sendMessage({ 
       type: 'ANALYZE_VIDEO',
       currentTime: currentTime
+    }).then((response) => {
+      if (response?.session !== undefined) {
+        activeAnalysisSession = response.session;
+      }
     }).catch(err => {
       console.error(`${QL_LOG} Analysis message error:`, err);
       showError(err.message || 'Failed to communicate with the extension.');
@@ -1083,6 +1118,10 @@ function initQuranLens() {
   // ─── Message Handler ──────────────────────────────────────────────────
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (isStaleAnalysisMessage(message)) {
+      return false;
+    }
+
     switch (message.type) {
       case 'TOGGLE_OVERLAY':
         toggleOverlay();
@@ -1162,13 +1201,7 @@ function initQuranLens() {
         return false;
 
       case 'VIDEO_CHANGED':
-        // New video — reset to idle if overlay is visible
-        currentResult = null;
-        if (isVisible) {
-          setState('idle');
-        }
-        // On VIDEO_CHANGED: restore position from storage (do not reset to default)
-        loadOverlayPosition();
+        resetForVideoChange();
         return false;
 
       default:
@@ -1207,4 +1240,24 @@ function initQuranLens() {
   }
 
   console.log(`${QL_LOG} Content script initialized`);
+  lastKnownVideoId = getVideoIdFromUrl();
+
+  // YouTube SPA navigation (clicking another video without full reload)
+  document.addEventListener('yt-navigate-finish', notifyVideoNavigation);
+
+  // Full page reload / bfcache restore
+  window.addEventListener('pageshow', () => {
+    const videoId = getVideoIdFromUrl();
+    if (videoId && videoId !== lastKnownVideoId) {
+      notifyVideoNavigation();
+    }
+  });
+
+  // Fallback: poll URL for edge cases where yt-navigate-finish doesn't fire
+  let urlCheckInterval = setInterval(() => {
+    const videoId = getVideoIdFromUrl();
+    if (videoId && videoId !== lastKnownVideoId) {
+      notifyVideoNavigation();
+    }
+  }, 1000);
 }

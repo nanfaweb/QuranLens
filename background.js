@@ -20,6 +20,110 @@ const CACHE_TTL_MS = 240000;       // 4 minutes
 // ─── Disambiguation Buffers ──────────────────────────────────────────────────
 const tabBuffers = {};
 
+// ─── Analysis session tracking (cancel stale runs on video change) ───────────
+const tabAnalysisSession = new Map(); // tabId → generation number
+
+function bumpAnalysisSession(tabId) {
+  const next = (tabAnalysisSession.get(tabId) || 0) + 1;
+  tabAnalysisSession.set(tabId, next);
+  return next;
+}
+
+function isActiveSession(tabId, session) {
+  return tabAnalysisSession.get(tabId) === session;
+}
+
+async function resetPageCaptionState(tabId) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      func: () => {
+        window.dispatchEvent(new CustomEvent('quranlens-video-changed'));
+        window.dispatchEvent(new CustomEvent('quranlens-reset-buffer'));
+      }
+    });
+  } catch (e) {
+    console.warn('[QuranLens BG] Failed to reset page caption state:', e.message);
+  }
+}
+
+async function fetchFreshPlayerResponse(tabId, videoId, maxAttempts = 8) {
+  if (!videoId) return null;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId },
+        world: 'MAIN',
+        func: (targetVideoId) => {
+          const sanitizeResponse = (response) => {
+            if (!response) return null;
+            const details = response.videoDetails || {};
+            if (details.videoId === targetVideoId) {
+              return {
+                captions: response.captions || null,
+                videoDetails: {
+                  title: details.title || null,
+                  shortDescription: details.shortDescription || null,
+                  author: details.author || null,
+                  videoId: details.videoId || null
+                }
+              };
+            }
+            return null;
+          };
+
+          const p = sanitizeResponse(window.ytInitialPlayerResponse);
+          if (p) return p;
+
+          if (window.ytplayer?.config?.args?.raw_player_response) {
+            const pRaw = sanitizeResponse(window.ytplayer.config.args.raw_player_response);
+            if (pRaw) return pRaw;
+          }
+          return null;
+        },
+        args: [videoId]
+      });
+
+      const playerResponse = results?.[0]?.result;
+      if (playerResponse) {
+        return playerResponse;
+      }
+    } catch (e) {
+      console.warn(`[QuranLens BG] fetchFreshPlayerResponse attempt ${attempt + 1} failed:`, e.message);
+    }
+    await new Promise(r => setTimeout(r, 400));
+  }
+
+  return null;
+}
+
+function handleVideoNavigation(tabId, url) {
+  bumpAnalysisSession(tabId);
+  chrome.storage.session.remove('lastMatch').catch(() => {});
+  delete tabBuffers[tabId];
+
+  if (!url || !url.includes('youtube.com/watch')) {
+    return;
+  }
+
+  try {
+    const newVideoId = new URL(url).searchParams.get('v');
+    const oldVideoId = tabLastVideoId.get(tabId);
+    if (oldVideoId) {
+      captionUrlCache.delete(oldVideoId);
+    }
+    if (newVideoId) {
+      captionUrlCache.delete(newVideoId);
+      tabLastVideoId.set(tabId, newVideoId);
+    }
+  } catch (_) { /* ignore malformed URL */ }
+
+  resetPageCaptionState(tabId).catch(() => {});
+  chrome.tabs.sendMessage(tabId, { type: 'VIDEO_CHANGED' }).catch(() => {});
+}
+
 // ─── Icon Click → Toggle Overlay ────────────────────────────────────────────
 
 chrome.action.onClicked.addListener(async (tab) => {
@@ -68,19 +172,32 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return false;
     }
 
+    const session = bumpAnalysisSession(tabId);
+
     // Send immediate acknowledgment to prevent channel timeout (progress starts at 0)
-    sendResponse({ type: 'ANALYZING', progress: 0, confidence: null });
+    sendResponse({ type: 'ANALYZING', progress: 0, confidence: null, session });
 
     // Do the actual work asynchronously and push results to the tab
-    handleAnalyzeVideo(tabId, sender.tab, message.currentTime).catch(err => {
+    handleAnalyzeVideo(tabId, sender.tab, message.currentTime, session).catch(err => {
       console.error('[QuranLens BG] Analyze error:', err);
+      if (!isActiveSession(tabId, session)) return;
       chrome.tabs.sendMessage(tabId, {
         type: 'ERROR',
-        message: err.message || 'Analysis failed.'
+        message: err.message || 'Analysis failed.',
+        session
       }).catch(() => {});
     });
 
     return false; // We already called sendResponse synchronously
+  }
+
+  if (message.type === 'VIDEO_NAVIGATED') {
+    const tabId = sender.tab?.id;
+    if (tabId && sender.tab?.url) {
+      handleVideoNavigation(tabId, sender.tab.url);
+    }
+    sendResponse({ ok: true });
+    return false;
   }
 
   if (message.type === 'OPEN_QURAN') {
@@ -115,12 +232,14 @@ function computeHeartbeatProgress(hasReceivedCaptions, bestResult, isFinalizing)
   return 20;
 }
 
-async function sendAnalyzingHeartbeat(tabId, hasReceivedCaptions, bestResult, isFinalizing) {
+async function sendAnalyzingHeartbeat(tabId, session, hasReceivedCaptions, bestResult, isFinalizing) {
+  if (!isActiveSession(tabId, session)) return;
   try {
     await chrome.tabs.sendMessage(tabId, {
       type: 'ANALYZING',
       progress: computeHeartbeatProgress(hasReceivedCaptions, bestResult, isFinalizing),
-      confidence: bestResult?.confidence ?? null
+      confidence: bestResult?.confidence ?? null,
+      session
     });
   } catch (e) {
     console.warn('[QuranLens BG] Heartbeat send failed:', e.message);
@@ -169,6 +288,22 @@ async function fetchCaptionsFromCachedUrl(cachedUrl, currentTimeMs) {
     return null;
   } catch (e) {
     console.warn('[QuranLens BG] Cached URL fetch error:', e);
+    return null;
+  }
+}
+
+async function getVideoCurrentTimeSec(tabId) {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const video = document.querySelector('video');
+        return video && Number.isFinite(video.currentTime) ? video.currentTime : null;
+      }
+    });
+    const t = results?.[0]?.result;
+    return typeof t === 'number' && t >= 0 ? t : null;
+  } catch {
     return null;
   }
 }
@@ -235,7 +370,11 @@ async function fetchArabicCaptionsViaPlayer(tabId, videoId, currentTime, skipInj
       return result.captions;
     }
 
-    console.log('[QuranLens BG] Player-context caption fetch did not return usable text');
+    if (result?.error) {
+      console.warn('[QuranLens BG] Player-context caption fetch failed:', result.error, result);
+    } else {
+      console.log('[QuranLens BG] Player-context caption fetch did not return usable text');
+    }
     return null;
   } catch (e) {
     console.warn('[QuranLens BG] Player-context caption fetch failed:', e);
@@ -302,7 +441,7 @@ function deduplicateAndAppend(accumulated, newChunk) {
 
 // ─── Handler: Analyze Video ─────────────────────────────────────────────────
 
-async function handleAnalyzeVideo(tabId, tab, currentTime) {
+async function handleAnalyzeVideo(tabId, tab, currentTime, session) {
   let timeoutId = null;
   let scanComplete = false;
   const cleanup = () => {
@@ -313,13 +452,19 @@ async function handleAnalyzeVideo(tabId, tab, currentTime) {
   };
 
   try {
+    if (!isActiveSession(tabId, session)) return;
+
     if (!tab || !tab.url || !tab.url.includes('youtube.com/watch')) {
-      await pushResult(tabId, { type: 'ERROR', message: 'Please open a YouTube video first.' });
+      await pushResult(tabId, { type: 'ERROR', message: 'Please open a YouTube video first.', session });
       return;
     }
 
     const urlObj = new URL(tab.url);
     const videoId = urlObj.searchParams.get('v');
+    if (!videoId) {
+      await pushResult(tabId, { type: 'ERROR', message: 'Could not detect video ID.', session });
+      return;
+    }
 
     // Inject captions_page_fetch.js ONCE before the loop starts
     try {
@@ -332,58 +477,21 @@ async function handleAnalyzeVideo(tabId, tab, currentTime) {
       console.warn('[QuranLens BG] Initial captions_page_fetch.js injection failed (movie_player not ready), continuing:', e.message);
     }
 
-    // Retrieve player response from MAIN world (with retries for SPA navigation)
-    let playerResponse = null;
+    // Clear consumed caption events from any prior analysis on this page
     try {
-      if (videoId) {
-        for (let attempt = 0; attempt < 5; attempt++) {
-          try {
-            const results = await chrome.scripting.executeScript({
-              target: { tabId: tabId },
-              world: 'MAIN',
-              func: (targetVideoId) => {
-                const sanitizeResponse = (response) => {
-                  if (!response) return null;
-                  const details = response.videoDetails || {};
-                  if (details.videoId === targetVideoId) {
-                    return {
-                      captions: response.captions || null,
-                      videoDetails: {
-                        title: details.title || null,
-                        shortDescription: details.shortDescription || null,
-                        author: details.author || null,
-                        videoId: details.videoId || null
-                      }
-                    };
-                  }
-                  return null;
-                };
-
-                const p = sanitizeResponse(window.ytInitialPlayerResponse);
-                if (p) return p;
-
-                if (window.ytplayer && window.ytplayer.config && window.ytplayer.config.args) {
-                  const raw = window.ytplayer.config.args.raw_player_response;
-                  const pRaw = sanitizeResponse(raw);
-                  if (pRaw) return pRaw;
-                }
-                return null;
-              },
-              args: [videoId]
-            });
-
-            playerResponse = results?.[0]?.result;
-            if (playerResponse) {
-              break;
-            }
-          } catch (e) {
-            console.warn(`[QuranLens] executeScript attempt ${attempt + 1} failed:`, e);
-          }
-          await new Promise(r => setTimeout(r, 300));
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        world: 'MAIN',
+        func: () => {
+          window.dispatchEvent(new CustomEvent('quranlens-analysis-start'));
         }
-      }
-    } catch (e) {
-      console.warn('[QuranLens] Failed to retrieve playerResponse from MAIN world:', e);
+      });
+    } catch (_) { /* ignore */ }
+
+    // Wait for player response that matches the current video (handles SPA navigation lag)
+    let playerResponse = await fetchFreshPlayerResponse(tabId, videoId, 12);
+    if (!playerResponse) {
+      console.warn('[QuranLens BG] playerResponse not ready yet for videoId:', videoId);
     }
 
     const scanStartTime = Date.now();
@@ -414,11 +522,30 @@ async function handleAnalyzeVideo(tabId, tab, currentTime) {
     await new Promise((resolve) => {
       const tick = async () => {
         if (inTick) return;
+        if (!isActiveSession(tabId, session)) {
+          scanComplete = true;
+          cleanup();
+          resolve();
+          return;
+        }
         inTick = true;
 
         try {
           const elapsed = Date.now() - scanStartTime;
-          const currentTickTimeSec = (startAnchorTimeMs + elapsed) / 1000;
+          const liveTimeSec = await getVideoCurrentTimeSec(tabId);
+          const currentTickTimeSec = liveTimeSec ?? ((startAnchorTimeMs + elapsed) / 1000);
+
+          // Re-fetch player response if stale (common after SPA video switch)
+          if (!playerResponse || playerResponse.videoDetails?.videoId !== videoId) {
+            playerResponse = await fetchFreshPlayerResponse(tabId, videoId, 3);
+          }
+
+          if (!isActiveSession(tabId, session)) {
+            scanComplete = true;
+            cleanup();
+            resolve();
+            return;
+          }
 
           // Retrieve lastMatch
           const storageData = await chrome.storage.session.get('lastMatch');
@@ -609,7 +736,7 @@ async function handleAnalyzeVideo(tabId, tab, currentTime) {
           }
 
           // ── Heartbeat ──
-          await sendAnalyzingHeartbeat(tabId, hasReceivedCaptions, bestResult, false);
+          await sendAnalyzingHeartbeat(tabId, session, hasReceivedCaptions, bestResult, false);
 
         } catch (err) {
           console.error('[QuranLens BG] Error in polling loop tick:', err);
@@ -624,6 +751,8 @@ async function handleAnalyzeVideo(tabId, tab, currentTime) {
 
       timeoutId = setTimeout(tick, 0);
     });
+
+    if (!isActiveSession(tabId, session)) return;
 
     let finalResult = null;
     if (bestResult) {
@@ -652,33 +781,38 @@ async function handleAnalyzeVideo(tabId, tab, currentTime) {
       };
     }
 
-    await pushResult(tabId, finalResult);
+    await pushResult(tabId, finalResult, session);
 
-    try {
-      await chrome.scripting.executeScript({
-        target: { tabId },
-        world: 'MAIN',
-        func: () => {
-          window.dispatchEvent(new CustomEvent('quranlens-reset-buffer'));
-        }
-      });
-    } catch (e) {
-      console.warn('[QuranLens BG] Failed to dispatch reset buffer event:', e.message);
+    if (isActiveSession(tabId, session)) {
+      try {
+        await chrome.scripting.executeScript({
+          target: { tabId },
+          world: 'MAIN',
+          func: () => {
+            window.dispatchEvent(new CustomEvent('quranlens-reset-buffer'));
+          }
+        });
+      } catch (e) {
+        console.warn('[QuranLens BG] Failed to dispatch reset buffer event:', e.message);
+      }
     }
 
   } catch (err) {
     cleanup();
     console.error('[QuranLens BG] Analyze error:', err);
 
+    if (!isActiveSession(tabId, session)) return;
+
     if (err.message && err.message.includes('Could not establish connection')) {
       await pushResult(tabId, {
         type: 'ERROR',
-        message: 'Content script not ready. Please refresh the YouTube page and try again.'
+        message: 'Content script not ready. Please refresh the YouTube page and try again.',
+        session
       });
       return;
     }
 
-    await pushResult(tabId, { type: 'ERROR', message: err.message || 'Failed to analyze video.' });
+    await pushResult(tabId, { type: 'ERROR', message: err.message || 'Failed to analyze video.', session });
   }
 }
 
@@ -735,9 +869,13 @@ async function matchCaptions(text) {
 
 // ─── Push Result to Content Script ──────────────────────────────────────────
 
-async function pushResult(tabId, result) {
+async function pushResult(tabId, result, session) {
+  if (session !== undefined && !isActiveSession(tabId, session)) {
+    console.log('[QuranLens BG] Dropping stale result for tab', tabId, 'session', session);
+    return;
+  }
   try {
-    await chrome.tabs.sendMessage(tabId, result);
+    await chrome.tabs.sendMessage(tabId, { ...result, session });
   } catch (e) {
     console.warn('[QuranLens BG] Failed to push result to tab:', e);
   }
@@ -745,29 +883,15 @@ async function pushResult(tabId, result) {
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.url) {
-    chrome.storage.session.remove('lastMatch').catch(() => {});
-    delete tabBuffers[tabId];
-  }
-  if (changeInfo.url && changeInfo.url.includes('youtube.com/watch')) {
-    try {
-      const newVideoId = new URL(changeInfo.url).searchParams.get('v');
-      const oldVideoId = tabLastVideoId.get(tabId);
-      if (oldVideoId) {
-        captionUrlCache.delete(oldVideoId);
-      }
-      if (newVideoId) {
-        captionUrlCache.delete(newVideoId);
-        tabLastVideoId.set(tabId, newVideoId);
-      }
-    } catch (_) { /* ignore malformed URL */ }
-
-    chrome.tabs.sendMessage(tabId, { type: 'VIDEO_CHANGED' }).catch(() => {});
+    handleVideoNavigation(tabId, changeInfo.url);
   }
 });
 
 // ─── Tab Close Detection ───────────────────────────────────────────────────
 chrome.tabs.onRemoved.addListener((tabId) => {
   delete tabBuffers[tabId];
+  tabAnalysisSession.delete(tabId);
+  tabLastVideoId.delete(tabId);
 });
 
 console.log('[QuranLens] Service worker initialized.');
