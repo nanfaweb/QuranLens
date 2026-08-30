@@ -559,7 +559,7 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, session) {
 
     const scanStartTime = Date.now();
     // Timing model: FAST 6s / SLOW 10s scans; 30s absolute cap; pending inactivity 15s;
-    // tick 400ms (captions flowing) / 600ms (waiting); caption window -15s/+8s in parsers.
+    // tick 400ms (captions flowing) / 600ms (waiting); caption window ±8s in parsers.
     const FAST_SCAN_DURATION = 6000;
     const SLOW_SCAN_DURATION = 10000;
     const MAX_SCAN_DURATION = 30000;

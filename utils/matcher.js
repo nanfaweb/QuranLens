@@ -524,6 +524,11 @@ async function findVerse(transcriptText, lastMatch) {
         }
       }
 
+      // Saturate at 0.99: boosts rescue borderline candidates but must never
+      // create super-confidences (> 1) that outrank an exact match of the
+      // verse actually playing and bypass the tie-break entirely.
+      confidence = Math.min(confidence, 0.99);
+
       // Temporary debug log — disabled in hot path for performance
       // console.log("[QuranLens] top candidate:", verse.surah, verse.ayah, "score:", confidence, "threshold:", minConfidence);
 
@@ -546,7 +551,10 @@ async function findVerse(transcriptText, lastMatch) {
           surahName: surahInfo,
           text: verse.text || ''
         };
-        if (confidence >= 0.95) break;
+        // NOTE: no early exit here — breaking on a high-confidence candidate
+        // would skip the remaining candidates and defeat tie detection for
+        // identical verses (e.g. the Ar-Rahman refrain: the first instance in
+        // corpus order, 55:13, would always be returned as an unambiguous match).
       }
     }
 
@@ -584,18 +592,19 @@ async function findVerse(transcriptText, lastMatch) {
 
   // Playhead-centering tie-break: the caption window is symmetric (±8s), so
   // the verse actually playing sits near the MIDDLE of the transcript.
-  // Among results tied with the best confidence, pick the subwindow closest
-  // to the transcript center — the stable sort alone would always return the
-  // oldest tied verse (systematic verse lag), while "latest wins" overshoots
-  // to the partially recited next verse.
+  // Among results tied with the best confidence, pick the subwindow whose
+  // MIDPOINT is closest to the transcript center — the stable sort alone
+  // would always return the oldest tied verse (systematic verse lag), while
+  // "latest wins" overshoots to the partially recited next verse.
   const TIE_EPSILON = 0.005; // effectively exact ties (confidence is rounded to 2dp)
   const maxConfidence = subwindowResults[0].confidence;
   const targetPos = normalizedTranscript.length * 0.5;
+  const subwindowCenter = (subIdx) => subIdx * subwindowStep + subwindows[subIdx].length / 2;
   let topResult = subwindowResults[0];
-  let bestCenterDist = Math.abs(topResult.subIdx * subwindowStep - targetPos);
+  let bestCenterDist = Math.abs(subwindowCenter(topResult.subIdx) - targetPos);
   for (const res of subwindowResults) {
     if (maxConfidence - res.confidence <= TIE_EPSILON) {
-      const dist = Math.abs(res.subIdx * subwindowStep - targetPos);
+      const dist = Math.abs(subwindowCenter(res.subIdx) - targetPos);
       if (dist < bestCenterDist) {
         topResult = res;
         bestCenterDist = dist;
@@ -654,14 +663,51 @@ async function findVerse(transcriptText, lastMatch) {
         ayah: c.ayah,
         surahName: SURAH_INFO[c.surah] || { arabic: '', english: '', ayahCount: 0 }
       }));
+
+      // Identical-text verses (e.g. the Ar-Rahman refrain, repeated 31 times)
+      // tie exactly. Corpus order would always surface the lowest ayah
+      // (55:13); prefer the instance closest to where playback actually is.
+      //
+      // Best signal: a different-text verse matched elsewhere in this same
+      // transcript (anchor). If the anchor text appears BEFORE the tied
+      // subwindow, playback is just past it → expect anchor + 1; if after,
+      // expect anchor − 1. Fall back to lastMatch continuity.
+      const tiedText = firstNormalizedText;
+      let expectedSurah = null;
+      let expectedAyah = null;
+      for (const res of subwindowResults) {
+        if (normalizeArabic(res.text) === tiedText) continue;
+        if (maxConfidence - res.confidence > 0.15) break; // anchors must be credible
+        expectedSurah = res.surah;
+        expectedAyah = res.subIdx < topResult.subIdx ? res.ayah + 1 : res.ayah - 1;
+        break;
+      }
+      if (expectedAyah === null && lastMatch && !lastMatchIsStale) {
+        expectedSurah = lastMatch.surah;
+        expectedAyah = lastMatch.ayah + 1;
+      }
+
+      let primary = ambiguousSet[0];
+      if (expectedAyah !== null) {
+        let bestDist = Infinity;
+        for (const c of ambiguousSet) {
+          if (c.surah !== expectedSurah) continue;
+          const dist = Math.abs(c.ayah - expectedAyah);
+          if (dist < bestDist) {
+            bestDist = dist;
+            primary = c;
+          }
+        }
+      }
+
       matchResult = {
         state: "tied",
         candidates: tiedCandidates,
-        surah: ambiguousSet[0].surah,
-        ayah: ambiguousSet[0].ayah,
-        confidence: ambiguousSet[0].confidence,
-        surahName: SURAH_INFO[ambiguousSet[0].surah] || { arabic: '', english: '', ayahCount: 0 },
-        text: ambiguousSet[0].text
+        surah: primary.surah,
+        ayah: primary.ayah,
+        confidence: primary.confidence,
+        surahName: SURAH_INFO[primary.surah] || { arabic: '', english: '', ayahCount: 0 },
+        text: primary.text
       };
     } else {
       matchResult = {

@@ -91,7 +91,10 @@ async function simulateSurah(corpus, surah, fromAyah, toAyah, useChainedLastMatc
     const result = await findVerse(transcript, useChainedLastMatch ? lastMatch : null);
     const matched = resultAyah(result);
     const lag = matched != null ? ayah - matched : null;
-    lags.push({ ayah, matched, lag, state: result?.state ?? 'null' });
+    const conf = result?.state === 'pending'
+      ? result.topCandidate?.confidence
+      : result?.confidence;
+    lags.push({ ayah, matched, lag, state: result?.state ?? 'null', conf: conf ?? null });
 
     if (useChainedLastMatch && matched != null && result?.state === 'match') {
       lastMatch = { surah, ayah: matched };
@@ -121,6 +124,15 @@ function report(label, lags) {
   console.log('lag histogram (lag: count):', JSON.stringify(histogram));
   const misses = lags.filter(l => l.lag == null);
   if (misses.length) console.log(`no-result positions: ${misses.map(m => m.ayah).join(', ')}`);
+
+  const maxConf = Math.max(...lags.map(l => l.conf ?? 0));
+  console.log(`max confidence seen: ${maxConf}${maxConf > 0.99 ? '  *** INVALID (> 0.99) ***' : ''}`);
+
+  if (process.env.VERBOSE) {
+    for (const l of lags) {
+      console.log(`  playing ${l.ayah} → matched ${l.matched} (lag ${l.lag}, state ${l.state}, conf ${l.conf})`);
+    }
+  }
 }
 
 // ─── Pure window-math check ──────────────────────────────────────────────────
@@ -159,6 +171,14 @@ async function main() {
   // Ya-Sin (36): shorter verses — more verses inside the window, worst case
   const lags36 = await simulateSurah(corpus, 36, 1, 25, false);
   report('Surah 36 Ya-Sin, independent analyses (no lastMatch)', lags36);
+
+  // Ar-Rahman (55): identical refrain repeated 31 times — hardest tie case.
+  // Covers the reported bug: playing 55:29 must not return 55:13/25/26.
+  const lags55 = await simulateSurah(corpus, 55, 15, 40, false);
+  report('Surah 55 Ar-Rahman refrain region, independent', lags55);
+
+  const lags55chained = await simulateSurah(corpus, 55, 15, 40, true);
+  report('Surah 55 Ar-Rahman refrain region, chained lastMatch (real usage)', lags55chained);
 }
 
 main().catch(err => {
