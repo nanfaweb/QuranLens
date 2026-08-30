@@ -2,6 +2,7 @@
   "manifest_version": 3,
   "name": "QuranLens",
   "version": "1.1.0",
+  "minimum_chrome_version": "102",
   "description": "Detect Quran recitations on YouTube, identify the Surah and Ayah, and navigate to the verse on Quran.com.",
 
   "permissions": [

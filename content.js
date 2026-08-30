@@ -114,8 +114,8 @@ function initQuranLens() {
         --red-500: #ef4444;
         --amber-400: #fbbf24;
         --amber-500: #f59e0b;
-        --font-arabic: 'Amiri', serif;
-        --font-ui: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+        --font-arabic: 'Amiri', 'Noto Naskh Arabic', 'Geeza Pro', 'Arial Unicode MS', 'Segoe UI Historic', 'Tahoma', serif;
+        --font-ui: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Helvetica Neue', Arial, sans-serif;
         --radius-sm: 8px;
         --radius-md: 12px;
         --radius-lg: 16px;
