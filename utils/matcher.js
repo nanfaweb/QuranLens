@@ -233,6 +233,59 @@ let _corpus = null;
 let _ngramIndex = null;   // Map<trigram, number[]> — verse indices
 let _verseNgramCounts = null; // number[] — n-gram count per verse
 let _trigramIdf = null; // Map<trigram, number> — IDF weight per trigram
+/** @type {Map<string, Array<{surah: number, ayah: number}>>} */
+let _exactDuplicateLookup = null;
+/** @type {Map<string, Array<{surah: number, ayah: number}>>} */
+let _sharedPrefixLookup = null;
+
+function verseKey(surah, ayah) {
+  return `${surah}:${ayah}`;
+}
+
+function buildClusterLookup(clusters, crossSurahOnly = false) {
+  const lookup = new Map();
+  for (const cluster of clusters) {
+    if (crossSurahOnly && !cluster.spansMultipleSurahs) continue;
+    const members = cluster.verses || [];
+    for (const v of members) {
+      const key = verseKey(v.surah, v.ayah);
+      const others = members.filter(m => m.surah !== v.surah || m.ayah !== v.ayah);
+      if (others.length > 0) {
+        lookup.set(key, others);
+      }
+    }
+  }
+  return lookup;
+}
+
+async function loadClusterFiles() {
+  if (_exactDuplicateLookup && _sharedPrefixLookup) return;
+
+  _exactDuplicateLookup = new Map();
+  _sharedPrefixLookup = new Map();
+
+  try {
+    const exactUrl = chrome.runtime.getURL('data/exact_duplicate_clusters.json');
+    const exactRes = await fetch(exactUrl);
+    if (exactRes.ok) {
+      const exactClusters = await exactRes.json();
+      _exactDuplicateLookup = buildClusterLookup(exactClusters, true);
+    }
+  } catch (e) {
+    console.warn('[QuranLens] Failed to load exact duplicate clusters:', e.message);
+  }
+
+  try {
+    const prefixUrl = chrome.runtime.getURL('data/shared_prefix_clusters.json');
+    const prefixRes = await fetch(prefixUrl);
+    if (prefixRes.ok) {
+      const prefixClusters = await prefixRes.json();
+      _sharedPrefixLookup = buildClusterLookup(prefixClusters, false);
+    }
+  } catch (e) {
+    console.warn('[QuranLens] Failed to load shared prefix clusters:', e.message);
+  }
+}
 
 /**
  * Load the pre-built Quran corpus and build the n-gram inverted index.
@@ -282,6 +335,8 @@ async function loadCorpus() {
     console.timeEnd('[QuranLens] Building n-gram index');
     console.log(`[QuranLens] Index: ${_ngramIndex.size} unique trigrams for ${_corpus.length} verses`);
 
+    await loadClusterFiles();
+
     return _corpus;
   } catch (err) {
     console.error('[QuranLens] Failed to load corpus:', err);
@@ -290,6 +345,9 @@ async function loadCorpus() {
 }
 
 // ─── Candidate Selection ────────────────────────────────────────────────────
+
+const SUBWINDOW_SIZE = 60;
+const SUBWINDOW_STEP = 15;
 
 const MAX_CANDIDATES = 100;
 const MIN_CANDIDATES = 200; // FIX 3: minimum candidate pool size
@@ -397,10 +455,8 @@ async function findVerse(transcriptText, lastMatch) {
 
   // Generate overlapping subwindows of size 60, step 15
   const subwindows = [];
-  const subwindowSize = 60;
-  const subwindowStep = 15;
-  for (let i = 0; i < normalizedTranscript.length; i += subwindowStep) {
-    const end = Math.min(i + subwindowSize, normalizedTranscript.length);
+  for (let i = 0; i < normalizedTranscript.length; i += SUBWINDOW_STEP) {
+    const end = Math.min(i + SUBWINDOW_SIZE, normalizedTranscript.length);
     const sub = normalizedTranscript.substring(i, end);
     if (sub.length >= 10) {
       subwindows.push(sub);
@@ -501,7 +557,7 @@ async function findVerse(transcriptText, lastMatch) {
       // next verse), a short perfect prefix would otherwise score ~1.0 and
       // beat the verse actually playing. Compare against what the subwindow
       // could cover at most, so long verses are not penalized unfairly.
-      const expectedCompareLen = Math.min(ayahLen, subwindowSize);
+      const expectedCompareLen = Math.min(ayahLen, SUBWINDOW_SIZE);
       const coverage = Math.min(1, compareText.length / expectedCompareLen);
       if (coverage < 0.6) {
         confidence *= (0.7 + 0.5 * coverage);
@@ -599,7 +655,7 @@ async function findVerse(transcriptText, lastMatch) {
   const TIE_EPSILON = 0.005; // effectively exact ties (confidence is rounded to 2dp)
   const maxConfidence = subwindowResults[0].confidence;
   const targetPos = normalizedTranscript.length * 0.5;
-  const subwindowCenter = (subIdx) => subIdx * subwindowStep + subwindows[subIdx].length / 2;
+  const subwindowCenter = (subIdx) => subIdx * SUBWINDOW_STEP + subwindows[subIdx].length / 2;
   let topResult = subwindowResults[0];
   let bestCenterDist = Math.abs(subwindowCenter(topResult.subIdx) - targetPos);
   for (const res of subwindowResults) {
@@ -644,15 +700,82 @@ async function findVerse(transcriptText, lastMatch) {
   let matchResult = null;
   if (ambiguousSet.length === 1) {
     const topCandidate = ambiguousSet[0];
-    const surahInfo = SURAH_INFO[topCandidate.surah] || { arabic: '', english: '', ayahCount: 0 };
-    matchResult = {
-      state: "match",
-      surah: topCandidate.surah,
-      ayah: topCandidate.ayah,
-      confidence: topCandidate.confidence,
-      surahName: surahInfo,
-      text: topCandidate.text
-    };
+    const topKey = verseKey(topCandidate.surah, topCandidate.ayah);
+
+    const exactClusterMembers = _exactDuplicateLookup?.get(topKey);
+    if (exactClusterMembers?.length) {
+      const clusterInCandidates = exactClusterMembers.filter(m =>
+        candidatesForBestSub.some(c => c.surah === m.surah && c.ayah === m.ayah)
+      );
+      if (clusterInCandidates.length > 0) {
+        console.log(`[QuranLens Matcher] Known ambiguous cluster detected: ${topKey}, cluster type: exact, requiring extra confirmation`);
+        const memberSet = new Map();
+        memberSet.set(topKey, topCandidate);
+        for (const m of exactClusterMembers) {
+          const mKey = verseKey(m.surah, m.ayah);
+          const fromList = candidatesForBestSub.find(c => c.surah === m.surah && c.ayah === m.ayah);
+          const corpusVerse = corpus.find(v => v.surah === m.surah && v.ayah === m.ayah);
+          memberSet.set(mKey, fromList || {
+            surah: m.surah,
+            ayah: m.ayah,
+            confidence: topCandidate.confidence,
+            text: corpusVerse?.text || ''
+          });
+        }
+        const tiedCandidates = [...memberSet.values()].map(c => ({
+          surah: c.surah,
+          ayah: c.ayah,
+          surahName: SURAH_INFO[c.surah] || { arabic: '', english: '', ayahCount: 0 }
+        }));
+        matchResult = {
+          state: 'tied',
+          candidates: tiedCandidates,
+          surah: topCandidate.surah,
+          ayah: topCandidate.ayah,
+          confidence: topCandidate.confidence,
+          surahName: SURAH_INFO[topCandidate.surah] || { arabic: '', english: '', ayahCount: 0 },
+          text: topCandidate.text
+        };
+      }
+    }
+
+    if (!matchResult) {
+      const prefixClusterMembers = _sharedPrefixLookup?.get(topKey);
+      if (prefixClusterMembers?.length) {
+        let bestClusterConf = 0;
+        for (const m of prefixClusterMembers) {
+          const found = candidatesForBestSub.find(c => c.surah === m.surah && c.ayah === m.ayah);
+          if (found && found.confidence > bestClusterConf) {
+            bestClusterConf = found.confidence;
+          }
+        }
+        if (bestClusterConf > 0 && (topCandidate.confidence - bestClusterConf) < 0.15) {
+          console.log(`[QuranLens Matcher] Known ambiguous cluster detected: ${topKey}, cluster type: shared-prefix, requiring extra confirmation`);
+          matchResult = {
+            state: 'pending',
+            topCandidate: {
+              surah: topCandidate.surah,
+              ayah: topCandidate.ayah,
+              confidence: topCandidate.confidence,
+              surahName: SURAH_INFO[topCandidate.surah] || { arabic: '', english: '', ayahCount: 0 },
+              text: topCandidate.text
+            }
+          };
+        }
+      }
+    }
+
+    if (!matchResult) {
+      const surahInfo = SURAH_INFO[topCandidate.surah] || { arabic: '', english: '', ayahCount: 0 };
+      matchResult = {
+        state: "match",
+        surah: topCandidate.surah,
+        ayah: topCandidate.ayah,
+        confidence: topCandidate.confidence,
+        surahName: surahInfo,
+        text: topCandidate.text
+      };
+    }
   } else {
     const firstNormalizedText = normalizeArabic(ambiguousSet[0].text);
     const allEqual = ambiguousSet.every(c => normalizeArabic(c.text) === firstNormalizedText);
@@ -723,7 +846,10 @@ async function findVerse(transcriptText, lastMatch) {
     }
   }
 
-  console.log('[QuranLens] Match result:', matchResult?.surah, matchResult?.ayah, 'confidence:', matchResult?.confidence);
+  const logSurah = matchResult?.surah ?? matchResult?.topCandidate?.surah;
+  const logAyah = matchResult?.ayah ?? matchResult?.topCandidate?.ayah;
+  const logConf = matchResult?.confidence ?? matchResult?.topCandidate?.confidence;
+  console.log('[QuranLens] Match result:', logSurah, logAyah, 'state:', matchResult?.state, 'confidence:', logConf);
   console.timeEnd('[QuranLens] Verse matching');
   return matchResult;
 }
@@ -746,6 +872,9 @@ if (typeof module !== 'undefined' && module.exports) {
     levenshtein: prefixLevenshtein,
     prefixLevenshtein,
     SURAH_INFO,
-    loadCorpus
+    loadCorpus,
+    selectCandidates,
+    SUBWINDOW_SIZE,
+    SUBWINDOW_STEP
   };
 }
