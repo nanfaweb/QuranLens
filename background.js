@@ -278,13 +278,14 @@ function computeHeartbeatProgress(hasReceivedCaptions, bestResult, isFinalizing)
   return 20;
 }
 
-async function sendAnalyzingHeartbeat(tabId, session, hasReceivedCaptions, bestResult, isFinalizing) {
+async function sendAnalyzingHeartbeat(tabId, session, hasReceivedCaptions, bestResult, isFinalizing, isPending = false) {
   if (!isActiveSession(tabId, session)) return;
   try {
     await chrome.tabs.sendMessage(tabId, {
       type: 'ANALYZING',
       progress: computeHeartbeatProgress(hasReceivedCaptions, bestResult, isFinalizing),
       confidence: bestResult?.confidence ?? null,
+      pending: isPending,
       session
     });
   } catch (e) {
@@ -488,6 +489,18 @@ function deduplicateAndAppend(accumulated, newChunk) {
     return cleanAccumulated;
   }
   return (cleanAccumulated + ' ' + nonOverlappingTail).trim();
+}
+
+// Cap the accumulated transcript so text from early in a long scan ages out.
+// Without this, a 10-30s scan matches against captions up to ~40s stale and
+// the matcher drifts to verses already finished. 80 words ≈ 60s of recitation,
+// comfortably above the 50-word pending finalization threshold.
+const MAX_TRANSCRIPT_WORDS = 80;
+
+function trimTranscriptWords(text) {
+  const words = (text || '').split(/\s+/).filter(Boolean);
+  if (words.length <= MAX_TRANSCRIPT_WORDS) return text;
+  return words.slice(-MAX_TRANSCRIPT_WORDS).join(' ');
 }
 
 // ─── Handler: Analyze Video ─────────────────────────────────────────────────
@@ -728,7 +741,7 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, session) {
 
             if (newCaptions && newCaptions.trim().length > 0) {
               const oldText = buffer.text;
-              buffer.text = deduplicateAndAppend(buffer.text, newCaptions);
+              buffer.text = trimTranscriptWords(deduplicateAndAppend(buffer.text, newCaptions));
               if (buffer.text !== oldText) {
                 buffer.attempts++;
                 buffer.lastPendingTime = Date.now();
@@ -781,7 +794,7 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, session) {
           } else {
             // Normal mode (not pending)
             if (newCaptions && newCaptions.length > 0) {
-              accumulatedText = deduplicateAndAppend(accumulatedText, newCaptions);
+              accumulatedText = trimTranscriptWords(deduplicateAndAppend(accumulatedText, newCaptions));
             }
 
             const wordCnt = getWordCount(accumulatedText);
@@ -819,7 +832,7 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, session) {
           }
 
           // ── Heartbeat ──
-          await sendAnalyzingHeartbeat(tabId, session, hasReceivedCaptions, bestResult, false);
+          await sendAnalyzingHeartbeat(tabId, session, hasReceivedCaptions, bestResult, false, isPendingMode);
 
         } catch (err) {
           console.error('[QuranLens BG] Error in polling loop tick:', err);

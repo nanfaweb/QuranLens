@@ -730,7 +730,7 @@ function initQuranLens() {
             <div class="ql-waveform-bar"></div>
           </div>
           <div class="ql-loading-text" id="ql-loading-text">Analyzing recitation...</div>
-          <div class="ql-loading-subtext">Searching captions & matching verses</div>
+          <div class="ql-loading-subtext" id="ql-loading-subtext">Searching captions & matching verses</div>
           <div class="ql-progress-container">
             <div class="ql-progress-bar" id="ql-progress-bar"></div>
           </div>
@@ -990,6 +990,8 @@ function initQuranLens() {
       if (bar) bar.style.width = '0%';
       const label = shadowRoot.getElementById('ql-loading-text');
       if (label) label.textContent = 'Listening...';
+      const subtext = shadowRoot.getElementById('ql-loading-subtext');
+      if (subtext) subtext.textContent = 'Searching captions & matching verses';
     }
 
     // Query the active video element to get current playback time (in seconds)
@@ -1183,9 +1185,13 @@ function initQuranLens() {
             bar.style.width = `${displayProgress}%`;
             
             const label = shadowRoot.getElementById('ql-loading-text');
+            const subtext = shadowRoot.getElementById('ql-loading-subtext');
             if (label) {
               if (displayProgress === 99) {
                 label.textContent = 'Finalizing match...';
+              } else if (message.pending) {
+                // Pending: candidates found but ambiguous — waiting for more captions
+                label.textContent = 'Listening for more context...';
               } else if (message.confidence != null) {
                 const confPercent = Math.round(message.confidence * 100);
                 label.textContent = `Verifying... (${confPercent}% confident)`;
@@ -1194,6 +1200,11 @@ function initQuranLens() {
               } else {
                 label.textContent = 'Listening...';
               }
+            }
+            if (subtext) {
+              subtext.textContent = message.pending
+                ? 'Several verses match so far — gathering more recitation'
+                : 'Searching captions & matching verses';
             }
           }
         }

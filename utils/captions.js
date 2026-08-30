@@ -65,7 +65,11 @@ function captionUrlNeedsPot(baseUrl) {
  * Extract subtitle text from a YouTube JSON3 caption payload.
  *
  * Timing model (must stay aligned with utils/captions_page_fetch.js):
- *   - Caption window: 15s lookback / 8s lookahead around playhead
+ *   - Caption window: 8s lookback / 8s lookahead around playhead.
+ *     Symmetric on purpose: a longer lookback floods the transcript with
+ *     already-recited verses, which the matcher then returns (verse lag).
+ *     Note events overlapping the window edge are included whole, so the
+ *     effective reach extends by up to one event duration on each side.
  *   - Nearest-event fallback: up to 8 events within 45s of playhead
  *
  * @param {Object} data — parsed JSON3 response
@@ -78,7 +82,7 @@ function parseJson3CaptionData(data, currentTimeMs) {
     return null;
   }
 
-  const CAPTION_LOOKBACK_MS = 15000;
+  const CAPTION_LOOKBACK_MS = 8000;
   const CAPTION_LOOKAHEAD_MS = 8000;
   const FALLBACK_MAX_DISTANCE_MS = 45000;
   const FALLBACK_MAX_EVENTS = 8;

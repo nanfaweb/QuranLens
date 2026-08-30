@@ -496,9 +496,15 @@ async function findVerse(transcriptText, lastMatch) {
         }
       }
 
-      // CHANGE 2.C: Penalize suspiciously short match regions
-      if (compareText.length < 0.25 * ayahLen) {
-        confidence -= 0.10;
+      // Graded partial-coverage penalty: when the window text is too short to
+      // substantially cover the candidate (transcript tail / partially recited
+      // next verse), a short perfect prefix would otherwise score ~1.0 and
+      // beat the verse actually playing. Compare against what the subwindow
+      // could cover at most, so long verses are not penalized unfairly.
+      const expectedCompareLen = Math.min(ayahLen, subwindowSize);
+      const coverage = Math.min(1, compareText.length / expectedCompareLen);
+      if (coverage < 0.6) {
+        confidence *= (0.7 + 0.5 * coverage);
       }
 
       // Missing-word penalty:
@@ -576,7 +582,26 @@ async function findVerse(transcriptText, lastMatch) {
   // Sort subwindowResults by confidence descending
   subwindowResults.sort((a, b) => b.confidence - a.confidence);
 
-  const topResult = subwindowResults[0];
+  // Playhead-centering tie-break: the caption window is symmetric (±8s), so
+  // the verse actually playing sits near the MIDDLE of the transcript.
+  // Among results tied with the best confidence, pick the subwindow closest
+  // to the transcript center — the stable sort alone would always return the
+  // oldest tied verse (systematic verse lag), while "latest wins" overshoots
+  // to the partially recited next verse.
+  const TIE_EPSILON = 0.005; // effectively exact ties (confidence is rounded to 2dp)
+  const maxConfidence = subwindowResults[0].confidence;
+  const targetPos = normalizedTranscript.length * 0.5;
+  let topResult = subwindowResults[0];
+  let bestCenterDist = Math.abs(topResult.subIdx * subwindowStep - targetPos);
+  for (const res of subwindowResults) {
+    if (maxConfidence - res.confidence <= TIE_EPSILON) {
+      const dist = Math.abs(res.subIdx * subwindowStep - targetPos);
+      if (dist < bestCenterDist) {
+        topResult = res;
+        bestCenterDist = dist;
+      }
+    }
+  }
 
   // Get candidates for the subwindow that produced topResult
   const candidatesForBestSub = subwindowCandidatesMap.get(topResult.subIdx) || [];

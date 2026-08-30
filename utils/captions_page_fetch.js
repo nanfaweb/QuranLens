@@ -5,7 +5,9 @@
  * require a player-generated pot= token; direct baseUrl fetches return empty.
  *
  * Timing model (must stay aligned with utils/captions.js):
- *   - Caption window: 15s lookback / 8s lookahead around playhead
+ *   - Caption window: 8s lookback / 8s lookahead around playhead.
+ *     Symmetric on purpose: a longer lookback floods the transcript with
+ *     already-recited verses, which the matcher then returns (verse lag).
  *   - Nearest-event fallback: up to 8 events within 45s of playhead
  *   - Track discovery wait: 20 × 300ms on first attempt per video
  */
@@ -13,7 +15,7 @@
 (function () {
   const LOG = '[QuranLens Page]';
 
-  const CAPTION_LOOKBACK_MS = 15000;
+  const CAPTION_LOOKBACK_MS = 8000;
   const CAPTION_LOOKAHEAD_MS = 8000;
   const FALLBACK_MAX_DISTANCE_MS = 45000;
   const FALLBACK_MAX_EVENTS = 8;
