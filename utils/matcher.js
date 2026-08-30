@@ -382,24 +382,18 @@ function selectCandidates(windowText) {
  * @returns {Promise<Object|null>} — { surah, ayah, confidence, surahName, text } or null
  */
 async function findVerse(transcriptText, lastMatch) {
-  console.log('[QuranLens Matcher] findVerse called with transcript length:', transcriptText?.length, 'text:', transcriptText);
   if (!transcriptText || typeof transcriptText !== 'string') {
-    console.log('[QuranLens Matcher] findVerse: Empty or invalid transcript.');
     return null;
   }
 
   const corpus = await loadCorpus();
   const normalizedTranscript = normalizeArabic(transcriptText, true);
   const transcriptWords = normalizedTranscript.split(/\s+/).filter(Boolean);
-  console.log('[QuranLens Matcher] findVerse: Normalized transcript:', normalizedTranscript);
 
-  // CHANGE 2.B: Minimum viable transcript gate
+  // Minimum viable transcript gate
   if (normalizedTranscript.trim().split(/\s+/).length < 6) {
-    console.log('[QuranLens Matcher] findVerse: Transcript has fewer than 6 words, returning null.');
     return null;
   }
-
-  console.log('[QuranLens Matcher] findVerse: lastMatch =', lastMatch);
 
   // Generate overlapping subwindows of size 60, step 15
   const subwindows = [];
@@ -524,8 +518,8 @@ async function findVerse(transcriptText, lastMatch) {
         }
       }
 
-      // Temporary debug log
-      console.log("[QuranLens] top candidate:", verse.surah, verse.ayah, "score:", confidence, "threshold:", minConfidence);
+      // Temporary debug log — disabled in hot path for performance
+      // console.log("[QuranLens] top candidate:", verse.surah, verse.ayah, "score:", confidence, "threshold:", minConfidence);
 
       if (confidence > minConfidence) {
         candidatesForThisSub.push({
@@ -546,6 +540,7 @@ async function findVerse(transcriptText, lastMatch) {
           surahName: surahInfo,
           text: verse.text || ''
         };
+        if (confidence >= 0.95) break;
       }
     }
 
@@ -657,7 +652,7 @@ async function findVerse(transcriptText, lastMatch) {
     }
   }
 
-  console.log('[QuranLens] Match result:', matchResult);
+  console.log('[QuranLens] Match result:', matchResult?.surah, matchResult?.ayah, 'confidence:', matchResult?.confidence);
   console.timeEnd('[QuranLens] Verse matching');
   return matchResult;
 }

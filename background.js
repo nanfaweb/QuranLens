@@ -93,10 +93,48 @@ async function fetchFreshPlayerResponse(tabId, videoId, maxAttempts = 8) {
     } catch (e) {
       console.warn(`[QuranLens BG] fetchFreshPlayerResponse attempt ${attempt + 1} failed:`, e.message);
     }
-    await new Promise(r => setTimeout(r, 400));
+    await new Promise(r => setTimeout(r, 150));
   }
 
   return null;
+}
+
+async function tryFastCachedAnalysis(tabId, videoId, currentTime, session) {
+  if (!videoId || !isActiveSession(tabId, session)) return null;
+
+  const cached = captionUrlCache.get(videoId);
+  if (!cached || Date.now() >= cached.expiresAt) return null;
+
+  const liveTimeSec = await getVideoCurrentTimeSec(tabId);
+  const timeSec = liveTimeSec ?? currentTime;
+  const captions = await fetchCaptionsFromCachedUrl(cached.url, timeSec * 1000);
+  if (!captions || captions.length <= 10) return null;
+
+  const storageData = await chrome.storage.session.get('lastMatch');
+  const lastMatch = storageData?.lastMatch || null;
+  const result = await findVerse(captions, lastMatch);
+
+  if (!result || (result.state !== 'match' && result.state !== 'tied')) return null;
+  if (!isActiveSession(tabId, session)) return null;
+
+  return { result, captions };
+}
+
+async function pushMatchResult(tabId, session, result) {
+  const stillTied = result.state === 'tied';
+  const payload = {
+    type: 'MATCH_RESULT',
+    result: {
+      ...result,
+      url: getQuranUrl(result.surah, result.ayah),
+      timestamp: Date.now()
+    },
+    ambiguous: stillTied
+  };
+  if (!stillTied) {
+    await chrome.storage.session.set({ lastMatch: { surah: result.surah, ayah: result.ayah } });
+  }
+  await pushResult(tabId, payload, session);
 }
 
 function handleVideoNavigation(tabId, url) {
@@ -488,11 +526,21 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, session) {
       });
     } catch (_) { /* ignore */ }
 
-    // Wait for player response that matches the current video (handles SPA navigation lag)
-    let playerResponse = await fetchFreshPlayerResponse(tabId, videoId, 12);
-    if (!playerResponse) {
-      console.warn('[QuranLens BG] playerResponse not ready yet for videoId:', videoId);
+    // Fast path: reuse cached signed caption URL (typical on re-analyze / same video)
+    const fastHit = await tryFastCachedAnalysis(tabId, videoId, currentTime, session);
+    if (fastHit) {
+      console.log('[QuranLens BG] Fast path: cached captions + match');
+      await pushMatchResult(tabId, session, fastHit.result);
+      return;
     }
+
+    // Fetch player response in parallel with scan start (non-blocking upfront wait)
+    let playerResponse = null;
+    let playerResponsePromise = fetchFreshPlayerResponse(
+      tabId,
+      videoId,
+      captionUrlCache.has(videoId) ? 2 : 4
+    );
 
     const scanStartTime = Date.now();
     const FAST_SCAN_DURATION = 6000;
@@ -535,11 +583,6 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, session) {
           const liveTimeSec = await getVideoCurrentTimeSec(tabId);
           const currentTickTimeSec = liveTimeSec ?? ((startAnchorTimeMs + elapsed) / 1000);
 
-          // Re-fetch player response if stale (common after SPA video switch)
-          if (!playerResponse || playerResponse.videoDetails?.videoId !== videoId) {
-            playerResponse = await fetchFreshPlayerResponse(tabId, videoId, 3);
-          }
-
           if (!isActiveSession(tabId, session)) {
             scanComplete = true;
             cleanup();
@@ -551,26 +594,38 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, session) {
           const storageData = await chrome.storage.session.get('lastMatch');
           const lastMatch = storageData?.lastMatch || null;
 
+          async function ensurePlayerResponse() {
+            if (playerResponse && playerResponse.videoDetails?.videoId === videoId) {
+              return playerResponse;
+            }
+            if (!playerResponsePromise) {
+              playerResponsePromise = fetchFreshPlayerResponse(tabId, videoId, 3);
+            }
+            playerResponse = await playerResponsePromise;
+            playerResponsePromise = null;
+            return playerResponse;
+          }
+
           // ── Caption fetch tiers ──
           let newCaptions = null;
 
           if (isFirstTick) {
-            // Parallel tier firing on tick 1
-            const [t1Result, t2Result, t3Result] = await Promise.allSettled([
-              videoId
-                ? fetchArabicCaptionsViaPlayer(tabId, videoId, currentTickTimeSec, true)
-                : Promise.resolve(null),
-              playerResponse
-                ? fetchArabicCaptions(playerResponse, currentTickTimeSec)
-                : Promise.resolve(null),
-              fetchCaptionsViaContentScript(tabId, playerResponse, currentTickTimeSec)
-            ]);
-
-            const pickTier = (r) =>
-              r.status === 'fulfilled' && r.value && r.value.length > 10 ? r.value : null;
-            newCaptions = pickTier(t1Result) || pickTier(t2Result) || pickTier(t3Result);
+            // Tier 1 first (uses cache when available — no playerResponse needed)
+            if (videoId) {
+              newCaptions = await fetchArabicCaptionsViaPlayer(tabId, videoId, currentTickTimeSec, true);
+            }
+            if (!newCaptions || newCaptions.length <= 10) {
+              const pr = await ensurePlayerResponse();
+              if (pr) {
+                newCaptions = await fetchArabicCaptions(pr, currentTickTimeSec);
+              }
+            }
+            if (!newCaptions || newCaptions.length <= 10) {
+              const pr = playerResponse || await ensurePlayerResponse();
+              newCaptions = await fetchCaptionsViaContentScript(tabId, pr, currentTickTimeSec);
+            }
           } else {
-            // Tier 1: Player context
+            // Tier 1: Player context / cache
             if (videoId) {
               try {
                 newCaptions = await fetchArabicCaptionsViaPlayer(tabId, videoId, currentTickTimeSec, true);
@@ -580,9 +635,12 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, session) {
             }
 
             // Tier 2: Service worker direct fetch
-            if ((!newCaptions || newCaptions.length <= 10) && playerResponse) {
+            if (!newCaptions || newCaptions.length <= 10) {
               try {
-                newCaptions = await fetchArabicCaptions(playerResponse, currentTickTimeSec);
+                const pr = await ensurePlayerResponse();
+                if (pr) {
+                  newCaptions = await fetchArabicCaptions(pr, currentTickTimeSec);
+                }
               } catch (e) {
                 console.warn('[QuranLens BG] Tier 2 fetch error:', e.message);
               }
@@ -590,7 +648,8 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, session) {
 
             // Tier 3: Content script fallback
             if (!newCaptions || newCaptions.length <= 10) {
-              newCaptions = await fetchCaptionsViaContentScript(tabId, playerResponse, currentTickTimeSec);
+              const pr = playerResponse || await ensurePlayerResponse();
+              newCaptions = await fetchCaptionsViaContentScript(tabId, pr, currentTickTimeSec);
             }
           }
 
@@ -895,3 +954,4 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 
 console.log('[QuranLens] Service worker initialized.');
+loadCorpus().catch(err => console.warn('[QuranLens] Corpus preload failed:', err));

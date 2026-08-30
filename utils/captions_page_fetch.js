@@ -325,9 +325,9 @@
       try { player.setOption('captions', 'track', track); } catch (_) { /* ignore */ }
       try { player.setOption('captions', 'reload', true); } catch (_) { /* ignore */ }
 
-      const maxAttempts = 20;
+      const maxAttempts = 12;
       for (let i = 0; i < maxAttempts; i++) {
-        await sleep(400);
+        await sleep(300);
 
         if (capturedJson3Text) {
           const parsed = parseJson3ToTranscript(capturedJson3Text, effectiveTimeMs);
