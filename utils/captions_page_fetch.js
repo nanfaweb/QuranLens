@@ -102,6 +102,23 @@
     return { transcript };
   }
 
+  /**
+   * The video the player is actually showing right now. After SPA navigation
+   * the player may briefly still report the previous video — trusting stale
+   * data here is what used to poison the no_arabic_track cache.
+   */
+  function getPlayerVideoId(player) {
+    try {
+      const vd = player.getVideoData?.();
+      if (vd?.video_id) return vd.video_id;
+    } catch (_) { /* ignore */ }
+    try {
+      return player.getPlayerResponse?.()?.videoDetails?.videoId || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   function captionTrackToPlayerTrack(track) {
     if (!track?.languageCode) return null;
     const name = track.name?.simpleText
@@ -117,7 +134,7 @@
     };
   }
 
-  function getArabicTrackCandidates(player) {
+  function getArabicTrackCandidates(player, videoId) {
     const tracklist = player?.getOption?.('captions', 'tracklist');
     if (Array.isArray(tracklist) && tracklist.length > 0) {
       return tracklist.filter(t =>
@@ -126,7 +143,14 @@
         (t.languageCode || '').startsWith('ar')
       );
     }
-    const captionTracks = player?.getPlayerResponse?.()
+    const playerResponse = player?.getPlayerResponse?.();
+    // Never take tracks from a player response belonging to another video
+    // (stale after SPA navigation)
+    const responseVideoId = playerResponse?.videoDetails?.videoId;
+    if (videoId && responseVideoId && responseVideoId !== videoId) {
+      return [];
+    }
+    const captionTracks = playerResponse
       ?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
     if (!Array.isArray(captionTracks)) return [];
     return captionTracks
@@ -213,7 +237,7 @@
     const sleep = ms => new Promise(r => setTimeout(r, ms));
 
     if (videoId && videoCaptionStatus.get(videoId) === 'no_arabic_track') {
-      return { error: 'no_arabic_track', cached: true };
+      return { error: 'no_arabic_track', cached: true, confirmed: true };
     }
 
     const player = document.getElementById('movie_player');
@@ -227,14 +251,37 @@
 
     let track = null;
     for (let i = 0; i < 20; i++) {
-      track = pickArabicTrack(getArabicTrackCandidates(player));
-      if (track) break;
+      // While the player is still on another video (SPA navigation in
+      // progress), don't collect candidates — they would be stale.
+      const playerVideoId = videoId ? getPlayerVideoId(player) : null;
+      const onRequestedVideo = !videoId || !playerVideoId || playerVideoId === videoId;
+      if (onRequestedVideo) {
+        track = pickArabicTrack(getArabicTrackCandidates(player, videoId));
+        if (track) break;
+      }
       await sleep(300);
     }
     if (!track) {
-      console.warn(LOG, 'no Arabic caption track on player');
-      if (videoId) videoCaptionStatus.set(videoId, 'no_arabic_track');
-      return { error: 'no_arabic_track' };
+      const playerVideoId = videoId ? getPlayerVideoId(player) : null;
+      if (videoId && playerVideoId && playerVideoId !== videoId) {
+        console.warn(LOG, 'player still on another video:', playerVideoId, 'wanted:', videoId);
+        return { error: 'player_not_ready' };
+      }
+
+      // Cache no_arabic_track ONLY when the player response is confirmed to
+      // belong to this video — otherwise a transient loading state would
+      // permanently mark a valid video as caption-less.
+      let confirmed = false;
+      try {
+        confirmed = !!videoId &&
+          player.getPlayerResponse?.()?.videoDetails?.videoId === videoId;
+      } catch (_) { /* ignore */ }
+
+      console.warn(LOG, 'no Arabic caption track on player, confirmed:', confirmed);
+      if (confirmed) {
+        videoCaptionStatus.set(videoId, 'no_arabic_track');
+      }
+      return { error: 'no_arabic_track', confirmed };
     }
 
     console.log(LOG, 'selected track:', track.languageCode, track.displayName, 'effectiveTimeMs:', effectiveTimeMs);

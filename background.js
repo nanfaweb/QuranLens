@@ -139,25 +139,40 @@ async function pushMatchResult(tabId, session, result) {
 }
 
 function handleVideoNavigation(tabId, url) {
+  if (!url || !url.includes('youtube.com/watch')) {
+    // Left the watch page: cancel any running scan and drop per-video state
+    bumpAnalysisSession(tabId);
+    chrome.storage.session.remove('lastMatch').catch(() => {});
+    delete tabBuffers[tabId];
+    tabLastVideoId.delete(tabId);
+    return;
+  }
+
+  let newVideoId = null;
+  try {
+    newVideoId = new URL(url).searchParams.get('v');
+  } catch (_) { /* ignore malformed URL */ }
+
+  // Dedupe: a single video switch triggers this from both tabs.onUpdated and
+  // the content script (yt-navigate-finish / URL poll). A late duplicate must
+  // not bump the session again — that would cancel an analysis the user just
+  // started on the new video and reset the overlay mid-run.
+  if (newVideoId && tabLastVideoId.get(tabId) === newVideoId) {
+    return;
+  }
+
   bumpAnalysisSession(tabId);
   chrome.storage.session.remove('lastMatch').catch(() => {});
   delete tabBuffers[tabId];
 
-  if (!url || !url.includes('youtube.com/watch')) {
-    return;
+  const oldVideoId = tabLastVideoId.get(tabId);
+  if (oldVideoId) {
+    captionUrlCache.delete(oldVideoId);
   }
-
-  try {
-    const newVideoId = new URL(url).searchParams.get('v');
-    const oldVideoId = tabLastVideoId.get(tabId);
-    if (oldVideoId) {
-      captionUrlCache.delete(oldVideoId);
-    }
-    if (newVideoId) {
-      captionUrlCache.delete(newVideoId);
-      tabLastVideoId.set(tabId, newVideoId);
-    }
-  } catch (_) { /* ignore malformed URL */ }
+  if (newVideoId) {
+    captionUrlCache.delete(newVideoId);
+    tabLastVideoId.set(tabId, newVideoId);
+  }
 
   resetPageCaptionState(tabId).catch(() => {});
   chrome.tabs.sendMessage(tabId, { type: 'VIDEO_CHANGED' }).catch(() => {});
@@ -418,8 +433,17 @@ async function fetchArabicCaptionsViaPlayer(tabId, videoId, currentTime, skipInj
     }
 
     if (result?.error === 'no_arabic_track') {
-      console.warn('[QuranLens BG] No Arabic caption track on this video');
-      return { captions: null, noArabicTrack: true };
+      // Only treat as definitive when the page confirmed the player response
+      // belongs to this video — otherwise it may be a transient loading state
+      // right after SPA navigation, and Tier 1 should be retried next tick.
+      const confirmed = result.confirmed === true;
+      console.warn('[QuranLens BG] No Arabic caption track on this video, confirmed:', confirmed);
+      return { captions: null, noArabicTrack: confirmed };
+    }
+
+    if (result?.error === 'player_not_ready') {
+      console.warn('[QuranLens BG] Player still switching videos — Tier 1 will retry');
+      return { captions: null, noArabicTrack: false };
     }
 
     if (result?.error) {
@@ -528,6 +552,17 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, session) {
     if (!videoId) {
       await pushResult(tabId, { type: 'ERROR', message: 'Could not detect video ID.', session });
       return;
+    }
+
+    // Race guard: if the user clicked Analyze before the navigation events
+    // for this video were processed, reset per-video state here and record
+    // the videoId so the late navigation event dedupes instead of cancelling
+    // this session.
+    if (tabLastVideoId.get(tabId) !== videoId) {
+      tabLastVideoId.set(tabId, videoId);
+      captionUrlCache.delete(videoId);
+      delete tabBuffers[tabId];
+      await chrome.storage.session.remove('lastMatch').catch(() => {});
     }
 
     // Inject captions_page_fetch.js ONCE before the loop starts
