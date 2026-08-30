@@ -3,38 +3,30 @@
  *
  * Loaded via chrome.scripting.executeScript. YouTube timedtext URLs often
  * require a player-generated pot= token; direct baseUrl fetches return empty.
+ *
+ * Timing model (must stay aligned with utils/captions.js):
+ *   - Caption window: 15s lookback / 8s lookahead around playhead
+ *   - Nearest-event fallback: up to 8 events within 45s of playhead
+ *   - Track discovery wait: 20 × 300ms on first attempt per video
  */
 
 (function () {
   const LOG = '[QuranLens Page]';
 
-  const consumedStartTimes = new Set();
-  let lastBufferStartTimes = [];
+  const CAPTION_LOOKBACK_MS = 15000;
+  const CAPTION_LOOKAHEAD_MS = 8000;
+  const FALLBACK_MAX_DISTANCE_MS = 45000;
+  const FALLBACK_MAX_EVENTS = 8;
 
-  function clearCaptionBuffer() {
-    consumedStartTimes.clear();
-    lastBufferStartTimes = [];
-    console.log(LOG, 'Caption buffer fully cleared');
-  }
+  /** @type {Map<string, 'no_arabic_track'>} */
+  const videoCaptionStatus = new Map();
 
-  // Always register lifecycle listeners (survives re-injection guard below)
   if (!window.__quranLensCaptionListeners) {
     window.__quranLensCaptionListeners = true;
 
     window.addEventListener('quranlens-video-changed', () => {
-      clearCaptionBuffer();
-    });
-
-    window.addEventListener('quranlens-analysis-start', () => {
-      clearCaptionBuffer();
-    });
-
-    window.addEventListener('quranlens-reset-buffer', () => {
-      console.log(LOG, 'Resetting caption buffer (marking current buffer events as consumed)', lastBufferStartTimes);
-      for (const t of lastBufferStartTimes) {
-        consumedStartTimes.add(t);
-      }
-      lastBufferStartTimes = [];
+      videoCaptionStatus.clear();
+      console.log(LOG, 'Video changed — caption status cache cleared');
     });
   }
 
@@ -42,7 +34,7 @@
     return;
   }
 
-  function parseJson3ToTranscript(text, currentTimeMs, options = {}) {
+  function parseJson3ToTranscript(text, currentTimeMs) {
     let data;
     try {
       data = JSON.parse(text);
@@ -53,10 +45,6 @@
     if (!Array.isArray(events) || events.length === 0) {
       return { error: 'no events in JSON3' };
     }
-
-    const lookbackMs = options.lookbackMs ?? 15000;
-    const lookaheadMs = options.lookaheadMs ?? 8000;
-    const skipConsumed = options.skipConsumed !== false;
 
     function extractEventText(event) {
       const eventSegs = [];
@@ -74,60 +62,40 @@
       const start = event.tStartMs || 0;
       const duration = event.dDurationMs || 3000;
       const end = start + duration;
-      const windowStart = timeMs - lookbackMs;
-      const windowEnd = timeMs + lookaheadMs;
+      const windowStart = timeMs - CAPTION_LOOKBACK_MS;
+      const windowEnd = timeMs + CAPTION_LOOKAHEAD_MS;
       return end >= windowStart && start <= windowEnd;
-    }
-
-    function collectEvents(filterFn) {
-      const eventTexts = [];
-      const currentBufferStartTimes = [];
-
-      for (const event of events) {
-        const start = event.tStartMs || 0;
-        if (skipConsumed && consumedStartTimes.has(start)) continue;
-
-        const eventText = extractEventText(event);
-        if (!eventText) continue;
-
-        if (currentTimeMs === undefined || filterFn(event, currentTimeMs)) {
-          eventTexts.push(eventText);
-          if (currentTimeMs !== undefined) currentBufferStartTimes.push(start);
-        }
-      }
-
-      return { eventTexts, currentBufferStartTimes };
     }
 
     console.log(LOG, 'parseJson3ToTranscript: currentTimeMs =', currentTimeMs, 'total events =', events.length);
 
-    let { eventTexts, currentBufferStartTimes } = collectEvents(eventOverlapsWindow);
+    let eventTexts = [];
+    for (const event of events) {
+      if (currentTimeMs !== undefined && !eventOverlapsWindow(event, currentTimeMs)) continue;
+      const eventText = extractEventText(event);
+      if (eventText) eventTexts.push(eventText);
+    }
 
-    // Fallback: auto-generated captions often lag — take nearest events to playback time
+    // Fallback: auto-generated captions often lag — nearest events within distance cap
     if (eventTexts.length === 0 && currentTimeMs !== undefined) {
       const ranked = events
         .map(event => {
           const start = event.tStartMs || 0;
           const text = extractEventText(event);
-          if (!text || (skipConsumed && consumedStartTimes.has(start))) return null;
-          return { start, text, distance: Math.abs(start - currentTimeMs) };
+          if (!text) return null;
+          const distance = Math.abs(start - currentTimeMs);
+          if (distance > FALLBACK_MAX_DISTANCE_MS) return null;
+          return { text, distance };
         })
         .filter(Boolean)
         .sort((a, b) => a.distance - b.distance)
-        .slice(0, 8);
+        .slice(0, FALLBACK_MAX_EVENTS);
 
       eventTexts = ranked.map(r => r.text);
-      currentBufferStartTimes = ranked.map(r => r.start);
-      console.log(LOG, 'parseJson3ToTranscript: using nearest-event fallback, count:', eventTexts.length);
-    }
-
-    if (currentTimeMs !== undefined) {
-      lastBufferStartTimes = currentBufferStartTimes;
-      console.log(LOG, 'Matched events count:', currentBufferStartTimes.length, 'startTimes:', currentBufferStartTimes);
+      console.log(LOG, 'parseJson3ToTranscript: nearest-event fallback, count:', eventTexts.length);
     }
 
     const transcript = eventTexts.join(' ').replace(/\s+/g, ' ').trim();
-    console.log(LOG, 'Final joined transcript:', transcript);
     if (!transcript) return { error: 'no text in JSON3 events' };
     return { transcript };
   }
@@ -220,14 +188,13 @@
 
   async function fetchTranscriptFromUrl(url, currentTimeMs) {
     const json3Url = buildJson3CaptionUrl(url);
-    console.log(LOG, 'Fetching timedtext URL as json3:', json3Url);
     const resp = await fetch(json3Url, { credentials: 'include' });
     if (!resp.ok) {
       return { error: 'HTTP ' + resp.status };
     }
     const text = await resp.text();
     if (!text || !text.trim()) {
-      return { error: 'empty body (length ' + text.length + ')' };
+      return { error: 'empty body' };
     }
     return parseJson3ToTranscript(text, currentTimeMs);
   }
@@ -242,14 +209,17 @@
 
   window.QuranLensFetchArabicCaptions = async function (videoId, currentTimeMs) {
     const sleep = ms => new Promise(r => setTimeout(r, ms));
-    const player = document.getElementById('movie_player');
 
+    if (videoId && videoCaptionStatus.get(videoId) === 'no_arabic_track') {
+      return { error: 'no_arabic_track', cached: true };
+    }
+
+    const player = document.getElementById('movie_player');
     if (!player?.getOption || !player?.setOption) {
       console.warn(LOG, 'movie_player or captions API unavailable');
       return { error: 'player_unavailable' };
     }
 
-    // Prefer live playback time — background anchor time can drift during long fetches
     const liveTimeMs = getLiveVideoTimeMs();
     const effectiveTimeMs = liveTimeMs ?? currentTimeMs;
 
@@ -261,6 +231,7 @@
     }
     if (!track) {
       console.warn(LOG, 'no Arabic caption track on player');
+      if (videoId) videoCaptionStatus.set(videoId, 'no_arabic_track');
       return { error: 'no_arabic_track' };
     }
 
@@ -280,6 +251,7 @@
         capturedJson3Text = trimmed;
       }
     }
+
     try {
       if (boundFetch) {
         globalThis.fetch = async (...args) => {
@@ -319,7 +291,6 @@
       try { player.loadModule?.('captions'); } catch (_) { /* ignore */ }
       await sleep(300);
 
-      // Toggle track to force a fresh timedtext request with pot= token
       try { player.setOption('captions', 'track', null); } catch (_) { /* ignore */ }
       await sleep(150);
       try { player.setOption('captions', 'track', track); } catch (_) { /* ignore */ }
@@ -335,7 +306,6 @@
             console.log(LOG, 'captured via network hook, length:', parsed.transcript.length);
             return { captions: parsed.transcript, signedUrl: capturedUrl || '' };
           }
-          console.warn(LOG, 'captured JSON3 but parse failed:', parsed.error);
         }
 
         const url = capturedUrl || findTimedtextUrl(track, videoId);
@@ -345,18 +315,11 @@
             console.log(LOG, 'fetched timedtext URL, length:', parsed.transcript.length);
             return { captions: parsed.transcript, signedUrl: capturedUrl || url || '' };
           }
-          if (parsed.error) {
-            console.warn(LOG, 'timedtext URL fetch failed:', parsed.error);
-          }
         }
       }
 
-      console.warn(LOG, 'timed out waiting for player timedtext', {
-        hadUrl: !!capturedUrl,
-        hadJson: !!capturedJson3Text,
-        effectiveTimeMs
-      });
-      return { error: 'timed_out', hadUrl: !!capturedUrl, hadJson: !!capturedJson3Text };
+      console.warn(LOG, 'timed out waiting for player timedtext', { hadUrl: !!capturedUrl, effectiveTimeMs });
+      return { error: 'timed_out', hadUrl: !!capturedUrl };
     } finally {
       if (originalFetch) globalThis.fetch = originalFetch;
       if (OriginalXHR) globalThis.XMLHttpRequest = OriginalXHR;

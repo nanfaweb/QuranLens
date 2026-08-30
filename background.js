@@ -40,7 +40,6 @@ async function resetPageCaptionState(tabId) {
       world: 'MAIN',
       func: () => {
         window.dispatchEvent(new CustomEvent('quranlens-video-changed'));
-        window.dispatchEvent(new CustomEvent('quranlens-reset-buffer'));
       }
     });
   } catch (e) {
@@ -93,7 +92,9 @@ async function fetchFreshPlayerResponse(tabId, videoId, maxAttempts = 8) {
     } catch (e) {
       console.warn(`[QuranLens BG] fetchFreshPlayerResponse attempt ${attempt + 1} failed:`, e.message);
     }
-    await new Promise(r => setTimeout(r, 150));
+    if (attempt < maxAttempts - 1) {
+      await new Promise(r => setTimeout(r, 150));
+    }
   }
 
   return null;
@@ -253,12 +254,19 @@ function getWordCount(text) {
   return (text || '').trim().split(/\s+/).filter(Boolean).length;
 }
 
-function shouldEarlyExit(stabilityCount, bestResult) {
-  const c = bestResult?.confidence ?? 0;
-  if (stabilityCount >= 1 && c >= 0.92) return true;
-  if (stabilityCount >= 2 && c >= 0.85) return true;
-  if (stabilityCount >= 3 && c >= 0.82) return true;
-  return false;
+async function buildLowConfMatch(text, lastMatch) {
+  const lastResult = await findVerse(text, lastMatch);
+  const topCandidate = lastResult?.topCandidate;
+  if (!topCandidate) return null;
+  return {
+    state: 'match',
+    surah: topCandidate.surah,
+    ayah: topCandidate.ayah,
+    confidence: topCandidate.confidence,
+    surahName: topCandidate.surahName,
+    text: topCandidate.text,
+    lowConfidence: true
+  };
 }
 
 function computeHeartbeatProgress(hasReceivedCaptions, bestResult, isFinalizing) {
@@ -353,7 +361,7 @@ async function getVideoCurrentTimeSec(tabId) {
  * @param {string} videoId
  * @param {number} [currentTime] — playback time in seconds
  * @param {boolean} [skipInjection=false] — if true, skip injecting captions_page_fetch.js
- * @returns {Promise<string|null>}
+ * @returns {Promise<{ captions: string|null, noArabicTrack: boolean }>}
  */
 async function fetchArabicCaptionsViaPlayer(tabId, videoId, currentTime, skipInjection = false) {
   try {
@@ -365,7 +373,7 @@ async function fetchArabicCaptionsViaPlayer(tabId, videoId, currentTime, skipInj
       if (cached && Date.now() < cached.expiresAt) {
         console.log('[QuranLens BG] Using cached signed timedtext URL for videoId:', videoId);
         const transcript = await fetchCaptionsFromCachedUrl(cached.url, currentTimeMs);
-        if (transcript) return transcript;
+        if (transcript) return { captions: transcript, noArabicTrack: false };
         console.log('[QuranLens BG] Cached URL fetch failed, falling through to page script');
       }
     }
@@ -405,7 +413,12 @@ async function fetchArabicCaptionsViaPlayer(tabId, videoId, currentTime, skipInj
         console.log('[QuranLens BG] Cached signed timedtext URL for videoId:', videoId);
       }
       console.log('[QuranLens BG] Player-context captions OK, length:', result.captions.length);
-      return result.captions;
+      return { captions: result.captions, noArabicTrack: false };
+    }
+
+    if (result?.error === 'no_arabic_track') {
+      console.warn('[QuranLens BG] No Arabic caption track on this video');
+      return { captions: null, noArabicTrack: true };
     }
 
     if (result?.error) {
@@ -413,10 +426,10 @@ async function fetchArabicCaptionsViaPlayer(tabId, videoId, currentTime, skipInj
     } else {
       console.log('[QuranLens BG] Player-context caption fetch did not return usable text');
     }
-    return null;
+    return { captions: null, noArabicTrack: false };
   } catch (e) {
     console.warn('[QuranLens BG] Player-context caption fetch failed:', e);
-    return null;
+    return { captions: null, noArabicTrack: false };
   }
 }
 
@@ -515,17 +528,6 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, session) {
       console.warn('[QuranLens BG] Initial captions_page_fetch.js injection failed (movie_player not ready), continuing:', e.message);
     }
 
-    // Clear consumed caption events from any prior analysis on this page
-    try {
-      await chrome.scripting.executeScript({
-        target: { tabId },
-        world: 'MAIN',
-        func: () => {
-          window.dispatchEvent(new CustomEvent('quranlens-analysis-start'));
-        }
-      });
-    } catch (_) { /* ignore */ }
-
     // Fast path: reuse cached signed caption URL (typical on re-analyze / same video)
     const fastHit = await tryFastCachedAnalysis(tabId, videoId, currentTime, session);
     if (fastHit) {
@@ -543,18 +545,36 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, session) {
     );
 
     const scanStartTime = Date.now();
+    // Timing model: FAST 6s / SLOW 10s scans; 30s absolute cap; pending inactivity 15s;
+    // tick 400ms (captions flowing) / 600ms (waiting); caption window -15s/+8s in parsers.
     const FAST_SCAN_DURATION = 6000;
     const SLOW_SCAN_DURATION = 10000;
+    const MAX_SCAN_DURATION = 30000;
+    const PENDING_INACTIVITY_MS = 15000;
+    const PENDING_ANCHOR_MAX_DRIFT_SEC = 30;
+    const SEEK_DETECTION_THRESHOLD_SEC = 5;
+
     let accumulatedText = '';
     let bestResult = null;
     let hasReceivedCaptions = false;
     let captionsFirstArrivedAt = null;
     let isFirstTick = true;
+    let skipTier1NoArabic = false;
+    let lastTickTimeSec = null;
+    let lastTickWallMs = null;
 
-    // Check if previous result was PENDING
-    let isPendingMode = !!tabBuffers[tabId];
-    if (isPendingMode) {
-      accumulatedText = tabBuffers[tabId].text;
+    // Resume pending buffer only if playback is still near the anchor position
+    let isPendingMode = false;
+    if (tabBuffers[tabId]) {
+      const buffer = tabBuffers[tabId];
+      const anchorSec = buffer.anchorTimeSec ?? currentTime;
+      if (Math.abs(currentTime - anchorSec) > PENDING_ANCHOR_MAX_DRIFT_SEC) {
+        console.log('[QuranLens BG] Dropping stale pending buffer (anchor drift)');
+        delete tabBuffers[tabId];
+      } else {
+        isPendingMode = true;
+        accumulatedText = buffer.text;
+      }
     }
 
     const getEffectiveScanDuration = () => {
@@ -590,9 +610,47 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, session) {
             return;
           }
 
+          // Seek detection: reset transcript if playhead jumped beyond normal playback
+          if (lastTickTimeSec !== null && lastTickWallMs !== null) {
+            const wallElapsedSec = (Date.now() - lastTickWallMs) / 1000;
+            const videoDeltaSec = Math.abs(currentTickTimeSec - lastTickTimeSec);
+            if (videoDeltaSec > wallElapsedSec + SEEK_DETECTION_THRESHOLD_SEC) {
+              console.log('[QuranLens BG] Seek detected — resetting transcript and pending buffer');
+              accumulatedText = '';
+              if (tabBuffers[tabId]) {
+                delete tabBuffers[tabId];
+                isPendingMode = false;
+              }
+            }
+          }
+          lastTickTimeSec = currentTickTimeSec;
+          lastTickWallMs = Date.now();
+
+          // Absolute scan cap (includes pending mode)
+          if (elapsed > MAX_SCAN_DURATION) {
+            console.log('[QuranLens BG] Absolute scan cap reached (30s)');
+            const storageData = await chrome.storage.session.get('lastMatch');
+            const lastMatch = storageData?.lastMatch || null;
+            if (isPendingMode && tabBuffers[tabId]) {
+              bestResult = await buildLowConfMatch(tabBuffers[tabId].text, lastMatch);
+              delete tabBuffers[tabId];
+            }
+            scanComplete = true;
+            cleanup();
+            resolve();
+            return;
+          }
+
           // Retrieve lastMatch
           const storageData = await chrome.storage.session.get('lastMatch');
           const lastMatch = storageData?.lastMatch || null;
+
+          async function applyTier1Fetch() {
+            if (!videoId || skipTier1NoArabic) return null;
+            const tier1 = await fetchArabicCaptionsViaPlayer(tabId, videoId, currentTickTimeSec, true);
+            if (tier1.noArabicTrack) skipTier1NoArabic = true;
+            return tier1.captions;
+          }
 
           async function ensurePlayerResponse() {
             if (playerResponse && playerResponse.videoDetails?.videoId === videoId) {
@@ -611,9 +669,7 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, session) {
 
           if (isFirstTick) {
             // Tier 1 first (uses cache when available — no playerResponse needed)
-            if (videoId) {
-              newCaptions = await fetchArabicCaptionsViaPlayer(tabId, videoId, currentTickTimeSec, true);
-            }
+            newCaptions = await applyTier1Fetch();
             if (!newCaptions || newCaptions.length <= 10) {
               const pr = await ensurePlayerResponse();
               if (pr) {
@@ -626,12 +682,10 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, session) {
             }
           } else {
             // Tier 1: Player context / cache
-            if (videoId) {
-              try {
-                newCaptions = await fetchArabicCaptionsViaPlayer(tabId, videoId, currentTickTimeSec, true);
-              } catch (e) {
-                console.warn('[QuranLens BG] Tier 1 injection/fetch error, continuing:', e.message);
-              }
+            try {
+              newCaptions = await applyTier1Fetch();
+            } catch (e) {
+              console.warn('[QuranLens BG] Tier 1 injection/fetch error, continuing:', e.message);
             }
 
             // Tier 2: Service worker direct fetch
@@ -660,28 +714,12 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, session) {
           }
 
           if (isPendingMode) {
-            // Check for timeout if in pending mode (15 seconds since last pending activity / start)
+            // Pending inactivity timeout (15s since last pending activity)
             const buffer = tabBuffers[tabId];
             const timeSincePending = Date.now() - buffer.lastPendingTime;
-            if (timeSincePending > 15000) {
-              const lastResult = await findVerse(buffer.text, lastMatch);
-              const topCandidate = lastResult && lastResult.topCandidate;
-              if (topCandidate) {
-                const lowConf = {
-                  state: "match",
-                  surah: topCandidate.surah,
-                  ayah: topCandidate.ayah,
-                  confidence: topCandidate.confidence,
-                  surahName: topCandidate.surahName,
-                  text: topCandidate.text,
-                  lowConfidence: true
-                };
-                delete tabBuffers[tabId];
-                bestResult = lowConf;
-              } else {
-                delete tabBuffers[tabId];
-                bestResult = null;
-              }
+            if (timeSincePending > PENDING_INACTIVITY_MS) {
+              bestResult = await buildLowConfMatch(buffer.text, lastMatch);
+              delete tabBuffers[tabId];
               scanComplete = true;
               cleanup();
               resolve();
@@ -719,23 +757,8 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, session) {
                   return;
                 } else if (result.state === "pending") {
                   if (wordCnt >= 50) {
-                    const topCandidate = result.topCandidate;
-                    if (topCandidate) {
-                      const lowConf = {
-                        state: "match",
-                        surah: topCandidate.surah,
-                        ayah: topCandidate.ayah,
-                        confidence: topCandidate.confidence,
-                        surahName: topCandidate.surahName,
-                        text: topCandidate.text,
-                        lowConfidence: true
-                      };
-                      delete tabBuffers[tabId];
-                      bestResult = lowConf;
-                    } else {
-                      delete tabBuffers[tabId];
-                      bestResult = null;
-                    }
+                    bestResult = await buildLowConfMatch(buffer.text, lastMatch);
+                    delete tabBuffers[tabId];
                     scanComplete = true;
                     cleanup();
                     resolve();
@@ -774,11 +797,12 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, session) {
                   resolve();
                   return;
                 } else if (result.state === "pending") {
-                  // Initialize buffer
+                  // Initialize buffer anchored to current playback position
                   tabBuffers[tabId] = {
                     text: accumulatedText,
                     attempts: 1,
-                    lastPendingTime: Date.now()
+                    lastPendingTime: Date.now(),
+                    anchorTimeSec: currentTickTimeSec
                   };
                   isPendingMode = true;
                   // Do not update UI yet, just continue loop
@@ -842,20 +866,6 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, session) {
 
     await pushResult(tabId, finalResult, session);
 
-    if (isActiveSession(tabId, session)) {
-      try {
-        await chrome.scripting.executeScript({
-          target: { tabId },
-          world: 'MAIN',
-          func: () => {
-            window.dispatchEvent(new CustomEvent('quranlens-reset-buffer'));
-          }
-        });
-      } catch (e) {
-        console.warn('[QuranLens BG] Failed to dispatch reset buffer event:', e.message);
-      }
-    }
-
   } catch (err) {
     cleanup();
     console.error('[QuranLens BG] Analyze error:', err);
@@ -872,57 +882,6 @@ async function handleAnalyzeVideo(tabId, tab, currentTime, session) {
     }
 
     await pushResult(tabId, { type: 'ERROR', message: err.message || 'Failed to analyze video.', session });
-  }
-}
-
-// ─── Match Captions Against Corpus ──────────────────────────────────────────
-
-async function matchCaptions(text) {
-  let joinedText = '';
-  if (Array.isArray(text)) {
-    joinedText = text.filter(e => e && typeof e === 'string').join(' ').replace(/\s+/g, ' ').trim();
-  } else if (typeof text === 'string') {
-    if (text.startsWith('[')) {
-      try {
-        const parsed = JSON.parse(text);
-        if (Array.isArray(parsed)) {
-          joinedText = parsed.filter(e => e && typeof e === 'string').join(' ').replace(/\s+/g, ' ').trim();
-        } else {
-          joinedText = text.trim();
-        }
-      } catch (_) {
-        joinedText = text.trim();
-      }
-    } else {
-      joinedText = text.trim();
-    }
-  }
-
-  if (!joinedText || joinedText.length < 10) {
-    return { type: 'NO_MATCH', message: 'Caption text too short for analysis.' };
-  }
-
-  try {
-    const storageData = await chrome.storage.session.get('lastMatch');
-    const lastMatch = storageData?.lastMatch || null;
-
-    const result = await findVerse(joinedText, lastMatch);
-
-    if (result) {
-      return {
-        type: 'MATCH_RESULT',
-        result: {
-          ...result,
-          url: getQuranUrl(result.surah, result.ayah),
-          timestamp: Date.now()
-        }
-      };
-    } else {
-      return { type: 'NO_MATCH', message: 'No Quran recitation detected in the captions.' };
-    }
-  } catch (err) {
-    console.error('[QuranLens BG] Matching error:', err);
-    return { type: 'ERROR', message: 'Error matching verses: ' + err.message };
   }
 }
 

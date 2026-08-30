@@ -1142,7 +1142,6 @@ function initQuranLens() {
         } else {
           renderResult(message.result);
         }
-        window.dispatchEvent(new CustomEvent('quranlens-reset-buffer'));
         return false;
 
       case 'NO_MATCH':
@@ -1255,6 +1254,7 @@ function initQuranLens() {
 
   // Fallback: poll URL for edge cases where yt-navigate-finish doesn't fire
   let urlCheckInterval = setInterval(() => {
+    if (document.hidden) return;
     const videoId = getVideoIdFromUrl();
     if (videoId && videoId !== lastKnownVideoId) {
       notifyVideoNavigation();

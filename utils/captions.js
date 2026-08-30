@@ -63,6 +63,11 @@ function captionUrlNeedsPot(baseUrl) {
 
 /**
  * Extract subtitle text from a YouTube JSON3 caption payload.
+ *
+ * Timing model (must stay aligned with utils/captions_page_fetch.js):
+ *   - Caption window: 15s lookback / 8s lookahead around playhead
+ *   - Nearest-event fallback: up to 8 events within 45s of playhead
+ *
  * @param {Object} data — parsed JSON3 response
  * @param {number} [currentTimeMs] — target playback time in milliseconds
  * @returns {string|null}
@@ -73,8 +78,10 @@ function parseJson3CaptionData(data, currentTimeMs) {
     return null;
   }
 
-  const lookbackMs = 15000;
-  const lookaheadMs = 8000;
+  const CAPTION_LOOKBACK_MS = 15000;
+  const CAPTION_LOOKAHEAD_MS = 8000;
+  const FALLBACK_MAX_DISTANCE_MS = 45000;
+  const FALLBACK_MAX_EVENTS = 8;
 
   function extractEventText(event) {
     const eventSegs = [];
@@ -92,7 +99,7 @@ function parseJson3CaptionData(data, currentTimeMs) {
     const start = event.tStartMs || 0;
     const duration = event.dDurationMs || 3000;
     const end = start + duration;
-    return end >= timeMs - lookbackMs && start <= timeMs + lookaheadMs;
+    return end >= timeMs - CAPTION_LOOKBACK_MS && start <= timeMs + CAPTION_LOOKAHEAD_MS;
   }
 
   const eventTexts = [];
@@ -110,11 +117,13 @@ function parseJson3CaptionData(data, currentTimeMs) {
         const start = event.tStartMs || 0;
         const text = extractEventText(event);
         if (!text) return null;
-        return { text, distance: Math.abs(start - currentTimeMs) };
+        const distance = Math.abs(start - currentTimeMs);
+        if (distance > FALLBACK_MAX_DISTANCE_MS) return null;
+        return { text, distance };
       })
       .filter(Boolean)
       .sort((a, b) => a.distance - b.distance)
-      .slice(0, 8);
+      .slice(0, FALLBACK_MAX_EVENTS);
     for (const r of ranked) eventTexts.push(r.text);
   }
 
