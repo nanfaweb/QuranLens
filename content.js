@@ -196,6 +196,7 @@ function initQuranLens() {
         width: 28px;
         height: 28px;
         flex-shrink: 0;
+        border-radius: 6px;
       }
 
       .ql-title {
@@ -660,10 +661,7 @@ function initQuranLens() {
       <!-- Header -->
       <div class="ql-header">
         <div class="ql-header-left">
-          <svg class="ql-logo" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <circle cx="16" cy="16" r="15" fill="#065f46" stroke="#10b981" stroke-width="1"/>
-            <text x="16" y="22" text-anchor="middle" fill="#fefdf8" font-family="'Amiri', serif" font-size="18" font-weight="700">ق</text>
-          </svg>
+          <img class="ql-logo" src="${chrome.runtime.getURL('icons/icon-48.png')}" alt="" />
           <div>
             <div class="ql-title">QuranLens</div>
             <div class="ql-subtitle">Quran Recitation Detector</div>

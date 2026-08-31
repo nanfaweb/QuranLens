@@ -55,7 +55,8 @@
         "data/quran_normalized.json",
         "data/exact_duplicate_clusters.json",
         "data/shared_prefix_clusters.json",
-        "utils/captions_page_fetch.js"
+        "utils/captions_page_fetch.js",
+        "icons/icon-48.png"
       ],
       "matches": ["<all_urls>"]
     }

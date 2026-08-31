@@ -43,17 +43,32 @@ async function generateIcons() {
 
   const sizes = [16, 32, 48, 128];
   const iconsDir = __dirname;
+  const logoPath = path.join(iconsDir, 'logo.svg');
+
+  if (!fs.existsSync(logoPath)) {
+    console.error(`  ✗ Logo SVG not found: ${logoPath}`);
+    process.exit(1);
+  }
+
+  let logoContent = fs.readFileSync(logoPath, 'utf-8');
+  if (!logoContent.includes('viewBox=')) {
+    logoContent = logoContent.replace(
+      /<svg([^>]*?)width="840" height="840"/,
+      '<svg$1width="840" height="840" viewBox="0 0 840 840"'
+    );
+    fs.writeFileSync(logoPath, logoContent);
+  }
 
   for (const size of sizes) {
     const svgPath = path.join(iconsDir, `icon-${size}.svg`);
     const pngPath = path.join(iconsDir, `icon-${size}.png`);
 
-    if (!fs.existsSync(svgPath)) {
-      console.warn(`  ⚠ SVG not found: ${svgPath}`);
-      continue;
-    }
+    const svgContent = logoContent.replace(
+      /<svg([^>]*?)width="840" height="840"/,
+      `<svg$1width="${size}" height="${size}"`
+    );
+    fs.writeFileSync(svgPath, svgContent);
 
-    const svgContent = fs.readFileSync(svgPath, 'utf-8');
     const svgBuffer = Buffer.from(svgContent);
 
     const canvas = createCanvas(size, size);
