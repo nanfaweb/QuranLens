@@ -1,47 +1,71 @@
-# QuranLens Privacy Policy
+# Privacy Policy for QuranLens
 
-Last updated: [insert date before publishing]
+**Last Updated:** September 04, 2026
 
-## Overview
+QuranLens ("we," "our," or "us") is committed to protecting your privacy. This Privacy Policy explains how QuranLens handles data when you use our Google Chrome extension.
 
-QuranLens is a Chrome extension that identifies the Quranic verse (Surah and Ayah) being recited in a YouTube video by matching the video's Arabic captions against a Quran text bundled inside the extension. This document explains what data QuranLens accesses, how it is used, and what is never done with it.
+---
 
-## What QuranLens Accesses
+## 1. Overview & Data Collection Summary
 
-QuranLens reads the following data, and only when the user actively uses the extension on a YouTube video page:
+QuranLens is designed with a privacy-first approach.
 
-- **Caption text** from the currently playing YouTube video (the Arabic subtitle/caption track), used to identify the recited verse.
-- **The video's title and ID**, used only to help identify the correct chapter (Surah) more efficiently and to ensure results correspond to the video currently playing.
+* **No Personal Data Collection:** QuranLens does **not** collect, track, store, or transmit any personally identifiable information (PII) such as your name, email address, IP address, browsing history, or location.
+* **No Account Required:** You are not required to create an account, register, or provide any credentials to use the extension.
+* **No Selling of User Data:** We do not sell, rent, trade, or transfer any user data to data brokers, advertisers, or third parties under any circumstances.
 
-QuranLens does not access, read, or monitor any other content on YouTube or any other website.
+---
 
-## What QuranLens Does Not Collect
+## 2. Chrome Extension Permissions & How They Are Used
 
-QuranLens does not collect, access, or process:
+QuranLens requests only the minimum Chrome permissions necessary to perform its core single-purpose utility:
 
-- Personally identifiable information (name, email, address, age, or any identifier)
-- Health information
-- Financial or payment information
-- Authentication information (passwords, credentials, PINs)
-- Personal communications (emails, texts, chat messages)
-- Location data (GPS, IP-based location, or region)
-- Web browsing history across other sites
-- User activity such as keystrokes, mouse movement, or clicks
+* **`storage`:** Used exclusively to save your local preferences (such as selected Quran translations, font size, or reading bookmarks) directly inside your local browser via Chrome's `chrome.storage` API. This data never leaves your device.
+* **`activeTab` / `scripting`:** Used strictly to interact with text on the active webpage when you invoke QuranLens features (such as scanning or selecting Quranic text on demand). QuranLens does not inspect, collect, or store content from other tabs or unassociated web traffic.
 
-## How Data Is Used and Stored
+---
 
-- All matching between caption text and the Quran corpus happens **entirely on the user's device**, inside the browser. No caption text, video data, or any other information is ever transmitted to any external server operated by QuranLens or any third party.
-- The current video's ID and title are held temporarily in the browser's session storage for the duration of the browsing session only, and are cleared automatically when the user navigates to a different video or closes the tab. This data is never written to persistent long-term storage, never synced to any account, and never leaves the user's device.
-- QuranLens does not use cookies, analytics, or tracking scripts of any kind.
+## 3. Third-Party Services & API Requests
 
-## Third Parties
+To display Quranic text, translations, or audio recitations, QuranLens may make direct HTTP network requests to public Quranic data APIs (such as `api.quran.com`).
 
-QuranLens does not sell, share, or transfer any user data to third parties. The only external network communication QuranLens performs is retrieving caption data directly from YouTube's own servers (a standard part of loading captions for the video the user is already watching) — this is not a transfer of user data to a third party, as it is data retrieval necessary for the extension's core function, and no data about the user is sent as part of this request.
+* These requests only fetch static text and audio files required to render the content.
+* No user identification, search profiles, or personal parameters are sent with these API requests.
 
-## Changes to This Policy
+---
 
-If this privacy policy changes, the updated version will be posted at this same URL with a revised "Last updated" date.
+## 4. Analytics & Tracking
 
-## Contact
+QuranLens does **not** use tracking cookies, cross-site tracking scripts, or analytics services (such as Google Analytics or Mixpanel). Your reading activity and extension usage remain completely private to your local browser session.
 
-For questions about this privacy policy, contact: [insert your contact email here]
+---
+
+## 5. Data Retention & Deletion
+
+Because all configuration data and bookmarks are stored locally on your device via Chrome’s internal storage, you maintain full control over your data at all times:
+
+* You can clear all extension settings at any time by clearing your browser cache/storage.
+* Uninstalling the QuranLens extension immediately removes all associated local preferences and cached data from your machine.
+
+---
+
+## 6. Compliance with Google Chrome Web Store Policies
+
+QuranLens fully complies with the [Chrome Web Store Developer Program Policies](https://developer.chrome.com/docs/webstore/program-policies/):
+
+* We adhere to the **Limited Use** requirements, ensuring data requested through Chrome permissions is strictly used to deliver user-facing functionality.
+* User data is never used for personalized advertising, credit assessment, or lending purposes.
+
+---
+
+## 7. Changes to This Privacy Policy
+
+We may update this Privacy Policy periodically to reflect changes in extension features or legal requirements. Any updates will be posted directly to this URL with an updated "Last Updated" date.
+
+---
+
+## 8. Contact Us
+
+If you have any questions or concerns regarding this Privacy Policy or QuranLens's privacy practices, please contact us at:
+
+* **Developer Email:** `afnanasifch@gmail.com`
