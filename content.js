@@ -5,7 +5,7 @@
  * Responsibilities:
  *  - Render a floating overlay panel directly on the YouTube page
  *  - Handle TOGGLE_OVERLAY, FETCH_CAPTIONS, and result messages from background
- *  - Manage UI state: idle, loading, result, no-match, no-captions, error
+ *  - Manage UI state: idle, loading, result, no-match, no-captions, error, about
  *  - No external API calls — all display data comes from local corpus
  */
 
@@ -23,6 +23,7 @@ function initQuranLens() {
   let overlayRoot = null;
   let shadowRoot = null;
   let currentState = 'idle';
+  let stateBeforeAbout = 'idle';
   let currentResult = null;
   let isVisible = false;
   let activeAnalysisSession = null;
@@ -215,6 +216,41 @@ function initQuranLens() {
         margin-top: 1px;
       }
 
+      .ql-header-actions {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        z-index: 1;
+      }
+
+      .ql-info-btn {
+        width: 22px;
+        height: 22px;
+        padding: 0;
+        border-radius: 50%;
+        border: 1px solid rgba(16, 185, 129, 0.35);
+        background: rgba(16, 185, 129, 0.08);
+        color: var(--cream-200);
+        font-family: var(--font-ui);
+        font-size: 12px;
+        font-weight: 700;
+        line-height: 1;
+        cursor: pointer;
+        opacity: 0.7;
+        transition: all 150ms ease;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .ql-info-btn:hover,
+      .ql-info-btn.ql-info-active {
+        opacity: 1;
+        color: var(--emerald-400);
+        background: rgba(16, 185, 129, 0.18);
+        border-color: rgba(16, 185, 129, 0.5);
+      }
+
       .ql-close-btn {
         background: none;
         border: none;
@@ -224,7 +260,6 @@ function initQuranLens() {
         transition: all 150ms ease;
         padding: 5px;
         border-radius: var(--radius-sm);
-        z-index: 1;
         display: flex;
         align-items: center;
         justify-content: center;
@@ -234,6 +269,35 @@ function initQuranLens() {
         opacity: 1;
         color: var(--red-400);
         background: rgba(248, 113, 113, 0.1);
+      }
+
+      /* ─── State: About ─────────────────────────────────────────────── */
+      .ql-about {
+        text-align: center;
+        gap: 12px;
+      }
+
+      .ql-about-message {
+        font-size: 12px;
+        line-height: 1.55;
+        color: var(--cream-200);
+        opacity: 0.85;
+        max-width: 280px;
+        margin: 0 auto 4px;
+      }
+
+      .ql-about-links {
+        display: flex;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 8px;
+        width: 100%;
+        max-width: 240px;
+      }
+
+      .ql-about-links .ql-btn-secondary {
+        justify-content: center;
+        width: 100%;
       }
 
       /* ─── Content Area ───────────────────────────────────────────── */
@@ -667,11 +731,14 @@ function initQuranLens() {
             <div class="ql-subtitle">Quran Recitation Detector</div>
           </div>
         </div>
-        <button class="ql-close-btn" id="ql-close" title="Close">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-          </svg>
-        </button>
+        <div class="ql-header-actions">
+          <button class="ql-info-btn" id="ql-info" title="About" aria-label="About" type="button">!</button>
+          <button class="ql-close-btn" id="ql-close" title="Close" type="button">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
       </div>
 
       <!-- Content -->
@@ -810,6 +877,31 @@ function initQuranLens() {
           </button>
         </div>
 
+        <!-- State: About -->
+        <div class="ql-state ql-about" id="ql-state-about">
+          <div class="ql-about-message">
+            Built with care for the ummah. Feedback and support mean a lot — reach out with your thoughts.
+          </div>
+          <div class="ql-about-links">
+            <button id="ql-btn-github" class="ql-btn-secondary" type="button">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.438 9.8 8.205 11.387.6.113.82-.26.82-.577 0-.285-.01-1.04-.016-2.04-3.338.726-4.042-1.61-4.042-1.61-.546-1.387-1.333-1.757-1.333-1.757-1.09-.745.083-.73.083-.73 1.205.085 1.84 1.237 1.84 1.237 1.07 1.834 2.807 1.304 3.492.997.108-.775.418-1.305.76-1.605-2.665-.303-5.467-1.333-5.467-5.93 0-1.31.468-2.382 1.235-3.22-.123-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.3 1.23.96-.267 1.98-.4 3-.405 1.02.005 2.04.138 3 .405 2.29-1.552 3.297-1.23 3.297-1.23.653 1.652.241 2.873.118 3.176.77.838 1.233 1.91 1.233 3.22 0 4.61-2.807 5.624-5.48 5.92.43.37.814 1.102.814 2.222 0 1.606-.014 2.898-.014 3.293 0 .32.216.694.825.576C20.565 21.796 24 17.297 24 12 24 5.37 18.63 0 12 0z"/>
+              </svg>
+              GitHub
+            </button>
+            <button id="ql-btn-linkedin" class="ql-btn-secondary" type="button">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 01-2.063-2.065 2.064 2.064 0 112.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/>
+              </svg>
+              LinkedIn
+            </button>
+            <button id="ql-btn-reachout" class="ql-btn-secondary" type="button">
+              Reach out with your thoughts
+            </button>
+            <button id="ql-btn-about-back" class="ql-btn-text" type="button">Back</button>
+          </div>
+        </div>
+
       </div>
 
       <!-- Footer -->
@@ -826,6 +918,30 @@ function initQuranLens() {
 
     // Close button
     $('ql-close').addEventListener('click', () => hideOverlay());
+
+    // About info toggle
+    $('ql-info').addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleAbout();
+    });
+
+    $('ql-btn-about-back').addEventListener('click', () => closeAbout());
+
+    const openExternal = (url) => {
+      chrome.runtime.sendMessage({ type: 'OPEN_QURAN', url });
+    };
+
+    $('ql-btn-github').addEventListener('click', () => {
+      openExternal('https://github.com/nanfaweb');
+    });
+
+    $('ql-btn-linkedin').addEventListener('click', () => {
+      openExternal('https://www.linkedin.com/in/afnanasifc/');
+    });
+
+    $('ql-btn-reachout').addEventListener('click', () => {
+      openExternal('mailto:afnanasifch@gmail.com');
+    });
 
     // Analyze button
     $('ql-btn-analyze').addEventListener('click', () => startAnalysis());
@@ -853,6 +969,7 @@ function initQuranLens() {
 
     header.addEventListener('mousedown', (e) => {
       if (e.button !== 0) return; // Only left click
+      if (e.target.closest('button')) return; // Don't drag from header buttons
 
       isDragging = true;
       const rect = overlayRoot.getBoundingClientRect();
@@ -947,6 +1064,24 @@ function initQuranLens() {
       target.classList.add('ql-active');
       requestAnimationFrame(() => target.classList.add('ql-fade-in'));
     }
+
+    const infoBtn = shadowRoot.getElementById('ql-info');
+    if (infoBtn) {
+      infoBtn.classList.toggle('ql-info-active', stateName === 'about');
+    }
+  }
+
+  function toggleAbout() {
+    if (currentState === 'about') {
+      closeAbout();
+      return;
+    }
+    stateBeforeAbout = currentState || 'idle';
+    setState('about');
+  }
+
+  function closeAbout() {
+    setState(stateBeforeAbout || 'idle');
   }
 
   // ─── Show / Hide Overlay ──────────────────────────────────────────────
