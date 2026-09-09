@@ -906,7 +906,7 @@ function initQuranLens() {
 
       <!-- Footer -->
       <div class="ql-footer">
-        <div class="ql-footer-text">QuranLens v1.0 — بِسْمِ ٱللَّهِ ٱلرَّحْمَـٰنِ ٱلرَّحِيمِ</div>
+        <div class="ql-footer-text">QuranLens v1.2 — بِسْمِ ٱللَّهِ ٱلرَّحْمَـٰنِ ٱلرَّحِيمِ</div>
       </div>
     `;
   }
