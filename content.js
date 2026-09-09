@@ -880,7 +880,7 @@ function initQuranLens() {
         <!-- State: About -->
         <div class="ql-state ql-about" id="ql-state-about">
           <div class="ql-about-message">
-            Built with care for the ummah. Feedback and support mean a lot — reach out with your thoughts.
+            Built with care :) Feedback and support mean a lot, reach out with your thoughts.
           </div>
           <div class="ql-about-links">
             <button id="ql-btn-github" class="ql-btn-secondary" type="button">
@@ -896,7 +896,7 @@ function initQuranLens() {
               LinkedIn
             </button>
             <button id="ql-btn-reachout" class="ql-btn-secondary" type="button">
-              Support the developer
+              Support the Developer
             </button>
             <button id="ql-btn-about-back" class="ql-btn-text" type="button">Back</button>
           </div>
