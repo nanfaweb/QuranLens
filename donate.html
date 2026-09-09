@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Support QuranLens</title>
+  <meta name="description" content="Optional support for QuranLens — donations help keep the extension free and maintained." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Amiri:wght@400;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --emerald-900: #064e3b;
+      --emerald-700: #047857;
+      --emerald-500: #10b981;
+      --emerald-400: #34d399;
+      --cream-50: #fefdf8;
+      --cream-200: #e8e4d9;
+      --dark-900: #0f1a15;
+      --dark-800: #162419;
+      --font-display: 'Amiri', Georgia, serif;
+      --font-ui: 'DM Sans', system-ui, sans-serif;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      min-height: 100vh;
+      font-family: var(--font-ui);
+      color: var(--cream-50);
+      background:
+        radial-gradient(ellipse 80% 50% at 50% -10%, rgba(16, 185, 129, 0.22), transparent 55%),
+        radial-gradient(ellipse 60% 40% at 90% 80%, rgba(5, 150, 105, 0.12), transparent 50%),
+        linear-gradient(165deg, var(--dark-900) 0%, var(--dark-800) 45%, #0a1410 100%);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 48px 20px 40px;
+    }
+
+    main {
+      width: 100%;
+      max-width: 420px;
+      text-align: center;
+    }
+
+    .brand {
+      font-family: var(--font-display);
+      font-size: clamp(2rem, 6vw, 2.6rem);
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: var(--cream-50);
+      line-height: 1.15;
+      margin-bottom: 10px;
+    }
+
+    .lede {
+      font-size: 1rem;
+      line-height: 1.55;
+      color: var(--cream-200);
+      opacity: 0.9;
+      margin-bottom: 28px;
+    }
+
+    .qr-wrap {
+      margin: 0 auto 18px;
+      max-width: 280px;
+    }
+
+    .qr-wrap img {
+      display: block;
+      width: 100%;
+      height: auto;
+      border-radius: 16px;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+    }
+
+    .hint {
+      font-size: 0.875rem;
+      line-height: 1.5;
+      color: var(--emerald-400);
+      margin-bottom: 28px;
+    }
+
+    .thanks {
+      font-size: 0.9rem;
+      line-height: 1.55;
+      color: var(--cream-200);
+      opacity: 0.75;
+      margin-bottom: 32px;
+    }
+
+    .privacy {
+      font-size: 0.8rem;
+      color: var(--emerald-400);
+      text-decoration: none;
+      border-bottom: 1px solid rgba(52, 211, 153, 0.35);
+      padding-bottom: 1px;
+      transition: color 150ms ease, border-color 150ms ease;
+    }
+
+    .privacy:hover {
+      color: var(--cream-50);
+      border-color: rgba(254, 253, 248, 0.4);
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1 class="brand">QuranLens</h1>
+    <p class="lede">
+      Donations are completely optional — and always welcome.
+      Your support helps keep QuranLens free, private, and maintained for the ummah.
+    </p>
+    <div class="qr-wrap">
+      <img
+        src="assets/paypal-qr.jpeg"
+        alt="PayPal QR code — scan to support the developer"
+        width="738"
+        height="1090"
+      />
+    </div>
+    <p class="hint">Scan with your phone to open PayPal.</p>
+    <p class="thanks">JazakAllahu khairan — every bit of kindness means a lot.</p>
+    <a class="privacy" href="./">Privacy Policy</a>
+  </main>
+</body>
+</html>

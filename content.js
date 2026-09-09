@@ -896,7 +896,7 @@ function initQuranLens() {
               LinkedIn
             </button>
             <button id="ql-btn-reachout" class="ql-btn-secondary" type="button">
-              Reach out with your thoughts
+              Support the developer
             </button>
             <button id="ql-btn-about-back" class="ql-btn-text" type="button">Back</button>
           </div>
@@ -940,7 +940,7 @@ function initQuranLens() {
     });
 
     $('ql-btn-reachout').addEventListener('click', () => {
-      openExternal('mailto:afnanasifch@gmail.com');
+      openExternal('https://nanfaweb.github.io/QuranLens/donate.html');
     });
 
     // Analyze button
